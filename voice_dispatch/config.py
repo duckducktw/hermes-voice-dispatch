@@ -40,11 +40,17 @@ class AudioConfig:
     device: Optional[Union[int, str]] = "HiFi__Mic1__source"
     # 凍結偵測 / 自動恢復（本機 DMIC 會「開檔後立刻凍結」，見 README 疑難排解）
     frozen_max_blocks: int = 240     # 連續多少個位元相同的區塊視為凍結（240×64ms≈15s）
-    recover_command: List[str] = field(default_factory=lambda: [
-        "systemctl", "--user", "restart", "wireplumber", "pipewire", "pipewire-pulse",
-    ])
-    recover_cooldown_sec: float = 120.0   # 兩次恢復之間最短間隔，避免一直重啟音訊
+    # 凍結時的「破壞性」恢復指令。**預設關閉（空清單）**：本機 mic 凍結是 SOF DMIC
+    # 驅動層問題（linux sof#11216），重啟 PipeWire 只換到約 15 秒的正常訊號就又凍結，
+    # 但 restart pipewire/pipewire-pulse 會把「所有 app」的音訊串流一起砍掉
+    # （2026-09-25 實測：每 2 分鐘一次、一天 36 次 → Discord / Minecraft 音訊反覆斷線）。
+    # 要回復舊行為就把 systemctl 那行填回來（建議只在確定沒其他 app 在用音訊時開）。
+    recover_command: List[str] = field(default_factory=list)
+    recover_cooldown_sec: float = 120.0   # 兩次恢復之間最短間隔
     recover_wait_sec: float = 7.0         # 恢復後等裝置回來
+    # 連續健康幾秒才把「恢復失敗計數」歸零。重啟後 mic 常會假活十幾秒就又凍結，
+    # 若一通過就歸零，退避永遠長不起來（會變成每 2 分鐘重啟一次）。
+    recover_reset_healthy_sec: float = 180.0
     status_file: str = "~/.local/state/hermes-voice-dispatch/mic-status.json"
     # 播放器候選，依序嘗試（會用 shlex 拆成 argv，{file} 由檔名取代）
     players: List[str] = field(default_factory=lambda: [

@@ -35,6 +35,7 @@ class VoiceDispatcher:
         self._stop = False
         self._last_recover = 0.0
         self._recover_count = 0
+        self._healthy_since = 0.0   # 連續健康起算點（見 _log_stream_health）
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -194,9 +195,21 @@ class VoiceDispatcher:
                     "問題在擷取路徑/驅動，不是拍手門檻。",
                     crest, peak,
                 )
-            if crest >= 2.0:
-                # 健康檢查通過 → 把恢復失敗計數歸零（冷卻回到基準值）
-                self._recover_count = 0
+            if crest >= 2.0 and peak >= 0.01:
+                # 健康檢查通過還不算數：重啟音效堆疊後 mic 常「假活」十幾秒就又凍結，
+                # 若一通過就把計數歸零，退避永遠長不起來（2026-09-25 實測：每 2 分鐘
+                # 重啟一次、整天 36 次，把使用者的音訊一直打斷）。要連續健康
+                # recover_reset_healthy_sec 秒才視為真的恢復。
+                now = time.monotonic()
+                need = float(
+                    getattr(self.cfg.audio, "recover_reset_healthy_sec", 180.0) or 180.0
+                )
+                if not self._healthy_since:
+                    self._healthy_since = now
+                elif now - self._healthy_since >= need:
+                    self._recover_count = 0
+            else:
+                self._healthy_since = 0.0
             self._write_status(rms, peak, crest, frozen=False)
         except Exception as exc:  # noqa: BLE001
             log.warning("麥克風健檢失敗：%s", exc)
