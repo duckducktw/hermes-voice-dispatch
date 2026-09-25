@@ -418,11 +418,12 @@ class VoiceDispatcher:
         """「開始聽」提示。
 
         `tts.prompt_mode == "chime"`（使用者 2026-09-25 指定的預設）：
-        只播一次「咚咚」，完全不講話——講話的提示音太慢也太吵。
+        只播一次提示音，完全不講話——講話的提示音太慢也太吵。
+        音檔用 `cue="start"` 那一組（開頭那顆，通常較高）。
         `"voice"`：舊行為（可選 beep + TTS 引導語，重問時換一句）。
         """
         if self.cfg.tts.prompt_mode == "chime":
-            tts.play_chime(self.cfg, logger=log)
+            tts.play_chime(self.cfg, logger=log, cue="start")
             return
         if self.cfg.tts.beep_enabled:
             tts.play_beep(self.cfg, logger=log)
@@ -433,13 +434,14 @@ class VoiceDispatcher:
             tts.speak(self.cfg.tts.ok_prompt, self.cfg, logger=log)
 
     def _cue_end(self) -> None:
-        """「聽完了」提示：chime 模式下再播一次「咚咚」。
+        """「聽完了」提示：chime 模式下再播一次提示音（`cue="end"`，通常較低）。
 
         有聽到需求、或使用者根本沒講話（前置靜音逾時）都算一輪結束，
-        所以兩種情況都會響——使用者要的是「開始咚、結束咚」的節奏。
+        所以兩種情況都會響——使用者要的是「開始一聲、結束一聲」的節奏，
+        而且兩聲要**明顯不同**才不會搞錯現在是哪個階段。
         """
         if self.cfg.tts.prompt_mode == "chime":
-            tts.play_chime(self.cfg, logger=log)
+            tts.play_chime(self.cfg, logger=log, cue="end")
 
     def prompt_and_capture(self, stream, attempt: int = 0) -> Optional[str]:
         """播提示音（chime＝咚咚／voice＝TTS）→ 錄需求 → 播結束音 → STT。

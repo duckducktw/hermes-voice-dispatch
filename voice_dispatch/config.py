@@ -231,6 +231,10 @@ class TtsConfig:
     chime_source: str = "synth"
     # 要播的音檔（依序串接；單一檔案＝整顆 cue）。檔案不存在就自動退回合成。
     chime_files: List[str] = field(default_factory=list)
+    # 開頭／結尾**各掛不同音**（使用者 2026-09-25：「一聲高一聲低，像 Discord 開關 mic，
+    # 但不要一樣，我會搞錯」）。留空＝退回上面的 chime_files（兩邊同一顆）。
+    chime_start_files: List[str] = field(default_factory=list)
+    chime_end_files: List[str] = field(default_factory=list)
     chime_file_max_sec: float = 2.5  # 單一素材最長取用秒數（避免提示音太長）
 
 

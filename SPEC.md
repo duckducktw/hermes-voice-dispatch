@@ -68,15 +68,18 @@
   見 R2 的 `vad.settle_sec` 與 `_looks_like_own_prompt()`。
 
 ### R2 語音引導 + 錄需求
-1. 喚醒成功 → 播一次「咚咚」（`tts.prompt_mode="chime"`，預設），**不講話**；
-   聽完需求（有講或沒講逾時都算）→ 再播一次「咚咚」。這兩聲就是使用者要的
-   全部提示（2026-09-25 定案：「開始咚、結束咚」，TTS 全部拿掉）。
-   - 「咚咚」音源兩種（`tts.chime_source`）：
-     `"files"`＝直接播**蘋果原廠素材音檔**（`tts.chime_files`，正式用法）；
-     `"synth"`＝FM 調變合成（沒有素材的機器才用）。合成版被使用者退貨兩次
-     （「空洞的咚咚」→「這他媽是火車」），所以**結論是別自己合成，用原廠素材**。
-     - 素材不入 repo（版權），放 `~/.local/share/hermes-voice-dispatch/chime/`；
-       本機用哪一顆寫在 repo 的 `config.yaml`（systemd 用 `--config` 指過去）。
+1. 喚醒成功 → 播一次提示音（`tts.prompt_mode="chime"`，預設），**不講話**；
+   聽完需求（有講或沒講逾時都算）→ 再播一次。這兩聲就是使用者要的全部提示。
+   - 兩聲**必須明顯不同**（2026-09-25 使用者：「一聲高一聲低，像 Discord 開關 mic，
+     但不要一樣，我會搞錯」）→ 用 `tts.chime_start_files` / `tts.chime_end_files`
+     各掛一顆；留空則退回共用的 `tts.chime_files`（兩邊同一顆）。
+   - 音源兩種（`tts.chime_source`）：
+     `"files"`＝直接播素材音檔（**正式用法**）；`"synth"`＝FM 調變合成（沒素材的機器才用）。
+     合成版被使用者退貨兩次（「空洞的咚咚」→「這他媽是火車」），
+     所以**結論是別自己合成，用現成素材**。
+     - 素材不入 repo（版權），放 `~/.local/share/hermes-voice-dispatch/chime/`
+       （`pairs/`＝高低配對、`cue_*`＝雙擊咚咚、`raw/`＝原廠原檔、`packs/`＝CC0 包）；
+       本機用哪一組寫在 repo 的 `config.yaml`（systemd 用 `--config` 指過去）。
      - 合成相關參數（`tts.chime_*`：FM 比／指數／泛音列／殘響…）保留但非主力。
    - 要回舊行為（TTS 講 `ok_prompt`／`retry_prompts`／`dispatched_prompt`）→
      `tts.prompt_mode="voice"`；舊的 beep（`tts.beep_enabled`）只在 voice 模式生效。

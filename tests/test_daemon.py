@@ -40,33 +40,33 @@ def _spy(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "voice_dispatch.daemon.tts.play_chime",
-        lambda cfg, logger=None: calls.append("chime") or True,
+        lambda cfg, logger=None, cue="start": calls.append(("chime", cue)) or True,
     )
     monkeypatch.setattr(
-        "voice_dispatch.daemon.tts.speak", lambda *a, **k: calls.append("speak") or True
+        "voice_dispatch.daemon.tts.speak", lambda *a, **k: calls.append(("speak", None)) or True
     )
     monkeypatch.setattr(
-        "voice_dispatch.daemon.tts.play_beep", lambda *a, **k: calls.append("beep") or True
+        "voice_dispatch.daemon.tts.play_beep", lambda *a, **k: calls.append(("beep", None)) or True
     )
     return calls
 
 
 def test_chime_mode_plays_chime_not_speech(monkeypatch):
-    """預設 chime 模式：開始／結束各一聲咚咚，完全不講話。"""
+    """預設 chime 模式：開始／結束各一聲，完全不講話；且兩者帶不同 cue。"""
     calls = _spy(monkeypatch)
     d = VoiceDispatcher(Config(), dry_run=True)
     d._cue_start(0)
     d._cue_end()
-    assert calls == ["chime", "chime"]
+    assert calls == [("chime", "start"), ("chime", "end")]
 
 
 def test_prompt_and_capture_chimes_even_when_nothing_said(monkeypatch):
-    """沒講任何內容而結束（VAD 逾時）→ 一樣要再一個咚咚。"""
+    """沒講任何內容而結束（VAD 逾時）→ 一樣要再一聲（end）。"""
     calls = _spy(monkeypatch)
     d = VoiceDispatcher(Config(), dry_run=True)
     monkeypatch.setattr(d, "_record_utterance", lambda stream: None)
     assert d.prompt_and_capture(object(), 0) is None
-    assert calls == ["chime", "chime"]
+    assert calls == [("chime", "start"), ("chime", "end")]
 
 
 def test_voice_mode_still_speaks(monkeypatch):
@@ -77,4 +77,4 @@ def test_voice_mode_still_speaks(monkeypatch):
     d = VoiceDispatcher(cfg, dry_run=True)
     d._cue_start(0)
     d._cue_end()
-    assert calls == ["speak"]
+    assert calls == [("speak", None)]

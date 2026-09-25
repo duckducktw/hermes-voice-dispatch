@@ -92,6 +92,10 @@ tts:
   # 素材不入 repo（版權），放在使用者家目錄，路徑只在 config.yaml 裡出現。
   chime_source: "synth"
   chime_files: []            # 例：["~/.local/share/hermes-voice-dispatch/chime/cue_1_Glass_macOS.mp3"]
+  # 開頭／結尾各掛不同音（「一聲高一聲低，像 Discord 開關 mic，但不要一樣」）。
+  # 留空＝兩邊都用上面的 chime_files。
+  chime_start_files: []
+  chime_end_files: []
   chime_file_max_sec: 2.5    # 單一素材最長取用秒數
 
 stt:

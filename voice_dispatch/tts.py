@@ -181,15 +181,16 @@ def _finalise(out: np.ndarray, cfg: Config, samplerate: int) -> np.ndarray:
     return out.astype(np.float32)
 
 
-def _chime_from_files(cfg: Config, samplerate: int) -> Optional[np.ndarray]:
-    """用 config 指定的音檔當「咚咚」（原廠素材模式）。
+def _chime_from_files(cfg: Config, samplerate: int, cue: str = "start") -> Optional[np.ndarray]:
+    """用 config 指定的音檔當提示音（原廠素材模式）。
 
     使用者 2026-09-25：「你找找蘋果素材」——不要再合成，直接用蘋果原廠音效。
     多個檔案會依序串接（之間插 `chime_gap_sec`），單一檔案＝整顆 cue 直接播。
+    `cue="start"`（喚醒）與 `cue="end"`（聽完）可各掛不同音檔：
+    `chime_start_files` / `chime_end_files`，沒設就退回共用的 `chime_files`。
     素材本身不放進 repo（版權），路徑由 config 指；檔案不存在就回 None 讓它退回合成。
     """
-    paths = [expand(p) for p in (getattr(cfg.tts, "chime_files", None) or [])]
-    paths = [p for p in paths if p and os.path.exists(p)]
+    paths = [p for p in _cue_paths(cfg, cue) if p and os.path.exists(p)]
     if not paths:
         return None
     max_n = int(round(float(getattr(cfg.tts, "chime_file_max_sec", 2.5) or 2.5) * samplerate))
@@ -209,19 +210,31 @@ def _chime_from_files(cfg: Config, samplerate: int) -> Optional[np.ndarray]:
     return np.concatenate(chunks) if chunks else None
 
 
-def make_chime(cfg: Config, samplerate: Optional[int] = None) -> np.ndarray:
-    """產生「咚咚」提示音（float32 樣本）。
+def _cue_paths(cfg: Config, cue: str) -> List[str]:
+    """取得某個 cue（start/end）要播的音檔清單。
 
-    使用者 2026-09-25 定案流程：喚醒響一次、聽完需求再響一次。
+    專屬清單（`chime_start_files` / `chime_end_files`）優先，
+    沒設就退回共用的 `chime_files`。
+    """
+    specific = getattr(cfg.tts, f"chime_{cue}_files", None) or []
+    chosen = specific or (getattr(cfg.tts, "chime_files", None) or [])
+    return [expand(p) for p in chosen]
+
+
+def make_chime(cfg: Config, samplerate: Optional[int] = None, cue: str = "start") -> np.ndarray:
+    """產生提示音（float32 樣本）。`cue` 為 `"start"`（喚醒）或 `"end"`（聽完需求）。
+
+    使用者 2026-09-25 定案流程：喚醒響一次、聽完需求再響一次，**且兩顆聽起來要不一樣**
+    （「一聲高一聲低，像 Discord 開關 mic，但不要一樣，我會搞錯」）。
     音源有兩種，由 `tts.chime_source` 決定：
-      - `"files"`：播 config 指定的**蘋果原廠音檔**（`tts.chime_files`，優先）。
+      - `"files"`：播 config 指定的**原廠／素材音檔**（優先）。
       - `"synth"`：用泛音列 + FM 調變 + 敲擊瞬態 + 殘響**合成**（參數全在 `tts.chime_*`）。
-    合成是為了在沒有素材的機器上也能運作；檔案模式才是「有質感」的正解。
+    合成是為了在沒有素材的機器上也能運作；素材模式才是有質感的正解。
     """
     sr = int(samplerate or cfg.audio.samplerate)
     source = str(getattr(cfg.tts, "chime_source", "synth") or "synth").lower()
     if source == "files":
-        loaded = _chime_from_files(cfg, sr)
+        loaded = _chime_from_files(cfg, sr, cue)
         if loaded is not None and loaded.size:
             return _finalise(loaded, cfg, sr)
     return _make_chime_synth(cfg, sr)
@@ -251,16 +264,16 @@ def _make_chime_synth(cfg: Config, samplerate: int) -> np.ndarray:
     return _finalise(out, cfg, sr)
 
 
-def play_chime(cfg: Config, logger=None) -> bool:
-    """合成並播放「咚咚」。靜音模式下不出聲（與 speak 一致）。"""
+def play_chime(cfg: Config, logger=None, cue: str = "start") -> bool:
+    """產生並播放提示音（cue="start"／"end"）。靜音模式下不出聲（與 speak 一致）。"""
     if muted(cfg):
         if logger:
-            logger.info("TTS 靜音中 → 跳過咚咚")
+            logger.info("TTS 靜音中 → 跳過提示音")
         return False
-    samples = make_chime(cfg)
+    samples = make_chime(cfg, cue=cue)
     if samples.size == 0:
         return False
-    path = os.path.join(tempfile.gettempdir(), f"vd_chime_{os.getpid()}.wav")
+    path = os.path.join(tempfile.gettempdir(), f"vd_chime_{cue}_{os.getpid()}.wav")
     try:
         audio.write_wav(path, samples, cfg.audio.samplerate)
         return audio.play_file(path, cfg.audio, logger=logger)

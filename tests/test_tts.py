@@ -113,3 +113,25 @@ def test_make_chime_falls_back_to_synth_when_asset_missing(tmp_path):
     assert float(np.abs(s).max()) > 0.05
 
 
+def test_make_chime_start_and_end_can_use_different_files(tmp_path):
+    """開頭一聲、結尾另一聲（使用者：「一聲高一聲低…不要一樣，我會搞錯」）。"""
+    from voice_dispatch import audio
+
+    cfg = Config()
+    sr = cfg.audio.samplerate
+    hi = np.sin(2 * np.pi * 880.0 * np.arange(int(0.15 * sr)) / sr).astype(np.float32)
+    lo = np.sin(2 * np.pi * 440.0 * np.arange(int(0.35 * sr)) / sr).astype(np.float32)
+    p_hi, p_lo = tmp_path / "hi.wav", tmp_path / "lo.wav"
+    audio.write_wav(str(p_hi), hi, sr)
+    audio.write_wav(str(p_lo), lo, sr)
+    cfg.tts.chime_source = "files"
+    cfg.tts.chime_start_files = [str(p_hi)]
+    cfg.tts.chime_end_files = [str(p_lo)]
+    assert tts.make_chime(cfg, cue="start").size == hi.size
+    assert tts.make_chime(cfg, cue="end").size == lo.size
+    # 沒設專屬清單的那一邊 → 退回共用的 chime_files
+    cfg.tts.chime_files = [str(p_lo)]
+    cfg.tts.chime_start_files = []
+    assert tts.make_chime(cfg, cue="start").size == lo.size
+
+
