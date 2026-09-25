@@ -76,7 +76,10 @@ class VoiceDispatcher:
         if self._silero is None:
             try:
                 self._silero = kws.SileroVad(
-                    self.cfg.vad.silero_threshold, logger=log
+                    self.cfg.vad.silero_threshold,
+                    model_path=getattr(self.cfg.vad, "silero_model", ""),
+                    rms_gate=getattr(self.cfg.vad, "silero_rms_gate", 0.0),
+                    logger=log,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("Silero VAD 載入失敗（%s）→ 改用 RMS 門檻", exc)
@@ -305,7 +308,7 @@ class VoiceDispatcher:
                     rms = float(np.sqrt(np.mean(np.square(d))))
                     peak = float(np.max(np.abs(d)))
                     crest = peak / rms if rms > 1e-12 else float("inf")
-                    if crest >= 2.0 and peak >= 0.01:
+                    if crest >= 2.0 and peak >= 0.003:
                         break
                 log.info(
                     "麥克風健檢第 %d 次仍無訊號（crest=%.2f peak=%.5f）→ 2 秒後重試",
@@ -315,7 +318,7 @@ class VoiceDispatcher:
                 "麥克風健檢（同一條串流）：rms=%.5f peak=%.5f crest=%.2f",
                 rms, peak, crest,
             )
-            if crest < 2.0 or peak < 0.01:
+            if crest < 2.0 or peak < 0.003:
                 log.warning(
                     "麥克風疑似死訊號（crest=%.2f peak=%.5f）→ 之後拍手不會有反應，"
                     "問題在擷取路徑/驅動，不是拍手門檻。",
@@ -438,6 +441,12 @@ class VoiceDispatcher:
         text = transcript.strip()
         if not text:
             log.warning("需求 STT 回空字串（錄到 %.2fs）→ 當作沒聽到", dur)
+            return None
+        # STT 腳本會把「疑似幻覺」的結果加上 ⚠️ 前綴；這種文字**絕不能派工**，
+        # 否則會送出一張內容是「謝謝觀看,下次見。」之類的假任務
+        # （2026-09-25 實際發生：假任務卡跑到 #人工智障）。
+        if text.startswith("⚠️") or "疑似辨識幻覺" in text:
+            log.warning("STT 標記為疑似幻覺 → 不派工（%r）", text[:60])
             return None
         log.info("需求轉錄：%r", text)
         return text

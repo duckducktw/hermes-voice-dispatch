@@ -101,7 +101,9 @@ class WakeConfig:
     # 信心度門檻 0.8 可擋掉近似音（實測 "The hurries of modern life"
     # conf=0.58~0.69 被擋掉）；真同音詞（"Her mess…" conf=1.0）擋不掉，屬正常。
     vosk_words: List[str] = field(default_factory=lambda: ["hermes", "hey hermes"])
-    vosk_min_conf: float = 0.8
+    # 太敏感 → 0.8 調到 0.9（2026-09-25 使用者反饋「太敏感了」）。
+    # 實測正例（含台灣腔）幾乎都 1.0，所以 0.9 不會漏判，但能擋掉更多近似音。
+    vosk_min_conf: float = 0.9
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0
@@ -123,6 +125,9 @@ class VadConfig:
     # 講話被判成「沒人講話」→ 程式一直重問需求。Silero 是訓練過的小模型，穩健得多。
     use_silero: bool = True
     silero_threshold: float = 0.5
+    # 省資源：安靜時（RMS 低於此）直接跳過 Silero 推論。實測環境底噪 ~0.0028，
+    # 所以 0.006 不會漏掉說話起頭，但能讓待機時幾乎不耗 CPU。
+    silero_rms_gate: float = 0.006
     preroll_keep_sec: float = 0.5        # 語音起點前額外保留的音訊（避免切掉字頭）
     # 2026-09-25：錄需求前先排掉串流緩衝。TTS 播放期間我們不讀串流，
     # PortAudio/pulse 會把那段音訊積在緩衝；不排掉的話，一開始錄就會先讀到
@@ -159,17 +164,26 @@ class TtsConfig:
     voice: str = "zh-CN-XiaoyiNeural"
     # 2026-09-25：文案改成「像在跟人講話」——短、口語、而且**每次重問換一句**，
     # 不要像機器人一樣重播同一句（使用者反饋「一直卡在問我需求」＋「不夠自然」）。
-    ok_prompt: str = "嗯，我在聽。"
+    # 再一輪（使用者：「好愛說廢話，說話快一點，不要重複我的內容」）：
+    #   - rate=+30% 讓它講快一點
+    #   - confirm_template 清空＝**不再複述使用者的內容**（那只是在重複他剛講的話）
+    #   - 所有提示語再縮短
+    rate: str = "+30%"              # edge-tts 語速（使用者要求「說話快一點」）
+    ok_prompt: str = "我在聽。"
     retry_prompts: List[str] = field(default_factory=lambda: [
-        "沒聽到，再說一次？",
-        "嗯？這次說大聲一點。",
-        "我這邊還是沒收到，靠近一點說？",
+        "再說一次？",
+        "大聲一點？",
+        "沒收到，再說一次？",
     ])
-    # 複述：純告知，不等待回覆
-    confirm_template: str = "好，「{transcript}」，我去處理。"
-    unclear_prompt: str = "好，那你再說一次。"
-    give_up_prompt: str = "那我先等你，需要的時候再叫我。"
-    dispatched_prompt: str = "好，我去處理。"
+    # 複述：**刻意留空＝不複述**（只在需要告知時才講話，別重複使用者內容）
+    confirm_template: str = ""
+    unclear_prompt: str = "再說一次。"
+    give_up_prompt: str = "先這樣。"
+    dispatched_prompt: str = "好。"
+    # 靜音模式：存在這個檔就完全不合成、不播放 TTS（測試時用，不必重啟 daemon）。
+    #   touch ~/.local/state/hermes-voice-dispatch/mute   → 靜音
+    #   rm    ~/.local/state/hermes-voice-dispatch/mute   → 恢復
+    mute_file: str = "~/.local/state/hermes-voice-dispatch/mute"
     beep_enabled: bool = False      # 機器感的「嗶」預設關掉（TTS 本身就是提示）
     beep_freq: float = 880.0
     beep_dur_sec: float = 0.18

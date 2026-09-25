@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -151,22 +152,55 @@ class SileroVad:
     要嘛太保守（隔著桌面講話被判成沒人講話，程式就一直重問需求）。
     """
 
-    def __init__(self, threshold: float = 0.5, logger=None):
-        from openwakeword.vad import VAD
+    FRAME = 480           # Silero 內部推論單位
 
-        self._vad = VAD()
+    def __init__(self, threshold: float = 0.5, model_path: str = "",
+                 rms_gate: float = 0.0, logger=None):
+        import onnxruntime as ort
+
+        path = os.path.expanduser(
+            model_path or "~/.local/share/hermes-voice-dispatch/silero_vad.onnx"
+        )
+        self._sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
         self.threshold = float(threshold)
+        self.rms_gate = float(rms_gate)
         self.last_prob = 0.0
+        self._sr = np.array(16000, dtype=np.int64)
         self._chunker = _Chunker()
+        self._reset_states()
         if logger:
-            logger.info("端點偵測：Silero VAD（門檻 %.2f）", self.threshold)
+            logger.info("端點偵測：Silero VAD（門檻 %.2f，RMS 閘 %.4f）",
+                        self.threshold, self.rms_gate)
+
+    def _reset_states(self) -> None:
+        self._h = np.zeros((2, 1, 64), dtype=np.float32)
+        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+
+    def _prob(self, chunk) -> float:
+        x = np.nan_to_num(chunk, nan=0.0, posinf=1.0, neginf=-1.0)
+        x = np.clip(x, -1.0, 1.0).astype(np.float32)
+        probs = []
+        for i in range(0, max(0, x.size - self.FRAME + 1), self.FRAME):
+            frame = x[i:i + self.FRAME].reshape(1, -1)
+            out = self._sess.run(None, {
+                "input": frame, "sr": self._sr, "h": self._h, "c": self._c,
+            })
+            self._h, self._c = out[1], out[2]
+            probs.append(float(out[0][0][0]))
+        return float(np.mean(probs)) if probs else 0.0
 
     def feed(self, samples) -> Optional[bool]:
         """餵入音訊區塊；有完整 80ms 區塊時回傳該區塊是否為語音，否則 None。"""
         verdict: Optional[bool] = None
         for chunk in self._chunker.push(samples):
+            rms = float(np.sqrt(np.mean(np.square(
+                np.asarray(chunk, dtype=np.float64)))))
+            if self.rms_gate > 0.0 and rms < self.rms_gate:
+                self.last_prob = 0.0      # 安靜 → 跳過推論（省 CPU）
+                verdict = False
+                continue
             try:
-                self.last_prob = float(self._vad.predict(_to_pcm16(chunk)))
+                self.last_prob = self._prob(chunk)
             except Exception:  # noqa: BLE001 —— VAD 壞掉不該讓整個守護程式掛掉
                 continue
             verdict = self.last_prob >= self.threshold

@@ -12,7 +12,7 @@ import tempfile
 import numpy as np
 
 from . import audio
-from .config import Config
+from .config import Config, expand
 
 
 def make_beep(
@@ -56,26 +56,46 @@ def play_beep(cfg: Config, logger=None) -> bool:
             pass
 
 
-async def _synth_async(text: str, voice: str, out_path: str) -> None:
+async def _synth_async(text: str, voice: str, out_path: str, rate: str = "") -> None:
     import edge_tts  # 延遲載入
 
-    communicate = edge_tts.Communicate(text, voice)
+    communicate = edge_tts.Communicate(text, voice, rate=(rate or "+0%"))
     await communicate.save(out_path)
 
 
-def synth_to_file(text: str, out_path: str, voice: str) -> str:
-    """用 edge-tts 把文字合成成 mp3 檔。回傳 out_path。"""
-    asyncio.run(_synth_async(text, voice, out_path))
+def synth_to_file(text: str, out_path: str, voice: str, rate: str = "") -> str:
+    """用 edge-tts 把文字合成成 mp3 檔。回傳 out_path。
+
+    rate 是 edge-tts 的語速（例如 "+30%"）——使用者要求「說話快一點」。
+    """
+    asyncio.run(_synth_async(text, voice, out_path, rate))
     return out_path
+
+
+def _mute_path(cfg: Config) -> str:
+    return expand(getattr(cfg.tts, "mute_file", "") or "")
+
+
+def muted(cfg: Config) -> bool:
+    """是否處於「靜音測試」模式。
+
+    存在 mute 檔就完全不合成、不播放——使用者要邊測邊不吵，而且改狀態不用重啟。
+    """
+    p = _mute_path(cfg)
+    return bool(p) and os.path.exists(p)
 
 
 def speak(text: str, cfg: Config, logger=None) -> bool:
     """合成語音並播放。失敗時記 log 但不丟例外（語音提示非關鍵路徑）。"""
     if not text:
         return False
+    if muted(cfg):
+        if logger:
+            logger.info("TTS 靜音中 → 跳過：%r", text)
+        return False
     path = os.path.join(tempfile.gettempdir(), f"vd_tts_{os.getpid()}.mp3")
     try:
-        synth_to_file(text, path, cfg.tts.voice)
+        synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
     except Exception as exc:  # noqa: BLE001 - 網路/合成失敗都不該讓主流程崩潰
         if logger:
             logger.warning("TTS 合成失敗：%s", exc)
