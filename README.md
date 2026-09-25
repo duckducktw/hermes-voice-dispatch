@@ -22,7 +22,13 @@ idle ──雙拍手──▶ 喚醒詞視窗(STT) ──命中「Hermes」─�
 - **R1 喚醒**：`sounddevice` 以 16kHz/單聲道持續讀取，只算 RMS（CPU 幾乎閒置）。
   偵測兩個「短促尖銳的能量瞬變」（自適應門檻），間隔落在 0.12–1.5 秒即判定雙拍手；
   接著錄 2.5 秒喚醒詞視窗，經 STT 比對 `hermes / 赫米斯 / 赫密斯 / 哈米斯`，命中才喚醒。
-- **R2 引導**：合成 beep 提示音 + TTS「OK，請說出你的需求。」
+- **R2 引導**：播一次提示音（`tts.prompt_mode="chime"`，預設，**不講話**）；
+  聽完需求（有講或沒講逾時都算）再播一次。兩聲語意不同：
+  **懂咚＝收到喚醒**、**咚懂＝錄音結束／沒收到錄音**，其他時間不出聲。
+  素材可用 `tools/make_cues.py` 重新產生（低沉＋快＋抖動，全合成、無版權問題）：
+  ```bash
+  ~/.hermes/hermes-agent/venv/bin/python3 tools/make_cues.py --variant 3 --loud
+  ```
 - **R3 轉錄**：能量 VAD 錄音 → 正規化成 16k mono wav → 經 `stt_scoped.sh` 轉錄。
 - **R4 回述確認**：TTS「我理解成：…。對嗎？」→ 錄音判定同意/不同意/無法判定，可重錄。
 - **R5 轉發**：Discord REST 發語音派工卡到主頻道並開 public thread，串內補完整任務卡。
