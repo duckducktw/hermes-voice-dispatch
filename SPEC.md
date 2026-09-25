@@ -78,8 +78,9 @@
      合成版被使用者退貨兩次（「空洞的咚咚」→「這他媽是火車」），
      所以**結論是別自己合成，用現成素材**。
      - 素材不入 repo（版權），放 `~/.local/share/hermes-voice-dispatch/chime/`
-       （`pairs/`＝高低配對、`cue_*`＝雙擊咚咚、`raw/`＝原廠原檔、`packs/`＝CC0 包）；
-       本機用哪一組寫在 repo 的 `config.yaml`（systemd 用 `--config` 指過去）。
+       （`pairs/`＝高低配對、`quad/`＝敲四下、`cue_*`＝雙擊咚咚、`raw/`＝原廠原檔、
+       `packs/`＝CC0 包）；本機用哪一組寫在 `config.yaml`（**已被 .gitignore 排除**，
+       systemd 用 `--config` 指過去）。
      - 合成相關參數（`tts.chime_*`：FM 比／指數／泛音列／殘響…）保留但非主力。
    - 要回舊行為（TTS 講 `ok_prompt`／`retry_prompts`／`dispatched_prompt`）→
      `tts.prompt_mode="voice"`；舊的 beep（`tts.beep_enabled`）只在 voice 模式生效。
