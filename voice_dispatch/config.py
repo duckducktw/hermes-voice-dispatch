@@ -53,6 +53,7 @@ class ClapConfig:
 @dataclass
 class WakeConfig:
     window_sec: float = 2.5         # 拍手後錄多久去比對喚醒詞
+    cooldown_sec: float = 10.0      # 喚醒詞沒過之後的冷卻，避免誤觸時反覆載入 STT
     keywords: List[str] = field(default_factory=lambda: [
         "hermes", "赫米斯", "赫密斯", "哈米斯",
     ])

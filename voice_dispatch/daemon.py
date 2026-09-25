@@ -104,13 +104,29 @@ class VoiceDispatcher:
                     transcript = stt.transcribe_samples(samples, self.cfg, logger=log)
                 except stt.SttError as exc:
                     log.warning("喚醒詞 STT 失敗：%s", exc)
+                    self._cooldown()
                     continue
                 log.info("喚醒詞視窗轉錄：%r", transcript)
                 if wake.verify_wake_word(transcript, self.cfg):
                     return True
                 log.info("未命中喚醒詞，靜默重置。")
                 # 靜默重置：不發任何音效/訊息，繼續監聽
+                self._cooldown()
         return False
+
+    def _cooldown(self) -> None:
+        """誤觸後的冷卻，避免短時間內反覆觸發 STT（每次都要載一次模型）。
+
+        可被 stop 訊號打斷。
+        """
+        seconds = float(getattr(self.cfg.wake, "cooldown_sec", 0.0) or 0.0)
+        if seconds <= 0:
+            return
+        import time
+
+        deadline = time.monotonic() + seconds
+        while not self._stop and time.monotonic() < deadline:
+            time.sleep(0.2)
 
     # ------------------------------------------------------------------
     # R2 + R3 + R4：錄需求 → 轉錄 → 回述確認
