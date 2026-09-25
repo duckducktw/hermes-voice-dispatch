@@ -188,6 +188,17 @@ class TtsConfig:
     beep_freq: float = 880.0
     beep_dur_sec: float = 0.18
     beep_volume: float = 0.3
+    # 提示模式（2026-09-25 使用者要求）：
+    #   "chime"（預設）＝整個互動只用「咚咚」兩聲，不講話：
+    #       喚醒 → 咚（tone1）咚（tone2）；聽完需求（有講／沒講都算）→ 再一次咚咚。
+    #   "voice"＝舊行為，用 edge-tts 講 ok_prompt / retry_prompts / dispatched_prompt。
+    prompt_mode: str = "chime"
+    # 咚咚（兩聲下行雙音，像門鈴／提示音）。音量刻意比 beep 低，不刺耳。
+    chime_tone1_hz: float = 784.0   # G5（第一聲「咚」）
+    chime_tone2_hz: float = 523.25  # C5（第二聲「咚」，下行完全四度）
+    chime_tone_dur_sec: float = 0.16
+    chime_gap_sec: float = 0.07     # 兩聲之間的縫
+    chime_volume: float = 0.35
 
 
 @dataclass

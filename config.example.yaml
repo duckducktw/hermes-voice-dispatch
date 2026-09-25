@@ -73,9 +73,20 @@ tts:
   unclear_prompt: "抱歉我沒聽清楚，請再說一次要或不要。"
   give_up_prompt: "我先放棄，請再說一次。"
   dispatched_prompt: "好的，已經派工出去了。"
+  beep_enabled: False     # 機器感的「嗶」（chime 模式用不到）
   beep_freq: 880.0
   beep_dur_sec: 0.18
   beep_volume: 0.3
+  # 提示模式（2026-09-25 使用者指定）：
+  #   "chime"（預設）＝整個互動只用「咚咚」兩聲、完全不講話：
+  #       喚醒 → 咚（tone1）咚（tone2）；聽完需求（有講／沒講都算）→ 再一次咚咚。
+  #   "voice"＝舊行為（edge-tts 講 ok_prompt / retry_prompts / dispatched_prompt）。
+  prompt_mode: "chime"
+  chime_tone1_hz: 784.0    # 第一聲「咚」（G5）
+  chime_tone2_hz: 523.25   # 第二聲「咚」（C5，下行完全四度）
+  chime_tone_dur_sec: 0.16
+  chime_gap_sec: 0.07      # 兩聲之間的縫
+  chime_volume: 0.35
 
 stt:
   scoped_script: "~/.hermes/scripts/voice_task/stt_scoped.sh"

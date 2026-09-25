@@ -414,12 +414,16 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R2 + R3 + R4：錄需求 → 轉錄 → 回述確認
     # ------------------------------------------------------------------
-    def prompt_and_capture(self, stream, attempt: int = 0) -> Optional[str]:
-        """播提示音 + TTS 引導 → 錄需求 → STT。回傳轉錄字串或 None。
+    def _cue_start(self, attempt: int = 0) -> None:
+        """「開始聽」提示。
 
-        attempt=0 講第一次的引導語；attempt>0 講「重問」那一組，
-        每次換一句（不要像機器人一樣重播同一句）。
+        `tts.prompt_mode == "chime"`（使用者 2026-09-25 指定的預設）：
+        只播一次「咚咚」，完全不講話——講話的提示音太慢也太吵。
+        `"voice"`：舊行為（可選 beep + TTS 引導語，重問時換一句）。
         """
+        if self.cfg.tts.prompt_mode == "chime":
+            tts.play_chime(self.cfg, logger=log)
+            return
         if self.cfg.tts.beep_enabled:
             tts.play_beep(self.cfg, logger=log)
         if attempt:
@@ -427,7 +431,26 @@ class VoiceDispatcher:
             tts.speak(lines[(attempt - 1) % len(lines)], self.cfg, logger=log)
         else:
             tts.speak(self.cfg.tts.ok_prompt, self.cfg, logger=log)
+
+    def _cue_end(self) -> None:
+        """「聽完了」提示：chime 模式下再播一次「咚咚」。
+
+        有聽到需求、或使用者根本沒講話（前置靜音逾時）都算一輪結束，
+        所以兩種情況都會響——使用者要的是「開始咚、結束咚」的節奏。
+        """
+        if self.cfg.tts.prompt_mode == "chime":
+            tts.play_chime(self.cfg, logger=log)
+
+    def prompt_and_capture(self, stream, attempt: int = 0) -> Optional[str]:
+        """播提示音（chime＝咚咚／voice＝TTS）→ 錄需求 → 播結束音 → STT。
+
+        attempt=0 講第一次的引導語；attempt>0 走「重問」那一組，
+        每次換一句（不要像機器人一樣重播同一句）。
+        回傳轉錄字串或 None。
+        """
+        self._cue_start(attempt)
         samples = self._record_utterance(stream)
+        self._cue_end()
         if samples is None or samples.size == 0:
             log.info("沒有錄到語音（前置靜音逾時）→ 第 %d 次嘗試", attempt + 1)
             return None
@@ -505,12 +528,15 @@ class VoiceDispatcher:
                 log.info("需求只有否定／重來詞（%r）→ 重錄。", transcript)
                 retries += 1
                 continue
-            tts.speak(
-                self.cfg.tts.confirm_template.format(transcript=transcript),
-                self.cfg, logger=log,
-            )
+            if self.cfg.tts.prompt_mode != "chime" and self.cfg.tts.confirm_template:
+                tts.speak(
+                    self.cfg.tts.confirm_template.format(transcript=transcript),
+                    self.cfg, logger=log,
+                )
             return transcript
-        tts.speak(self.cfg.tts.give_up_prompt, self.cfg, logger=log)
+        # chime 模式下「結束咚」已經在 prompt_and_capture 響過，這裡不再多出聲
+        if self.cfg.tts.prompt_mode != "chime":
+            tts.speak(self.cfg.tts.give_up_prompt, self.cfg, logger=log)
         log.info("超過重試上限，放棄本輪。")
         return None
 
@@ -569,7 +595,9 @@ class VoiceDispatcher:
                 log.error("連失敗通知都發不出去：%s", inner)
             return
         client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
-        tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
+        # chime 模式：整場只有「開始咚／結束咚」兩聲，派工後不再出聲
+        if self.cfg.tts.prompt_mode != "chime":
+            tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
         log.info("派工完成，thread=%s", thread_id)
 
     def _print_dry_run(self, transcript, thread_name, card, task_card) -> None:
