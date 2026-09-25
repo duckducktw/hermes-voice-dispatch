@@ -130,12 +130,64 @@ def input_stream(cfg: AudioConfig):
             stream.close()
 
 
+def reset_portaudio() -> None:
+    """強制重來一次 PortAudio 初始化。
+
+    重啟 PipeWire 之後，同一行程裡的 PortAudio 會卡在
+    「PortAudio not initialized [PaErrorCode -10000]」再也不肯動；
+    這個狀態只有砍掉重練才會好（2026-09-25 實測）。
+    """
+    try:
+        import sounddevice as sd  # 延遲載入
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        sd._terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sd._initialize()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def read_blocks(stream, blocksize: int) -> Iterator[np.ndarray]:
     """從已開啟的 stream 持續讀取單聲道 float32 區塊。"""
     while True:
         data, _overflowed = stream.read(blocksize)
         # data shape = (frames, channels)；取第一聲道攤平成 1D
         yield np.asarray(data, dtype=np.float32)[:, 0].copy()
+
+
+def read_blocks_watched(
+    stream,
+    blocksize: int,
+    frozen_max_blocks: int,
+    on_frozen=None,
+) -> Iterator[np.ndarray]:
+    """像 read_blocks，但偵測「凍結的擷取串流」。
+
+    真實麥克風一定帶微量抖動，不可能連續好幾秒位元完全相同；壞掉的擷取路徑
+    則會一直吐同一塊常數（本機 DMIC 的實際症狀）。連續 frozen_max_blocks 個
+    位元完全相同的區塊 → 呼叫 on_frozen(連續數) 並結束產生器，讓呼叫端重開
+    串流或做恢復，而不是傻等。
+    """
+    prev = None
+    run = 0
+    while True:
+        data, _overflowed = stream.read(blocksize)
+        arr = np.asarray(data, dtype=np.float32)[:, 0].copy()
+        raw = arr.tobytes()
+        if raw == prev:
+            run += 1
+            if frozen_max_blocks > 0 and run >= frozen_max_blocks:
+                if on_frozen is not None:
+                    on_frozen(run)
+                return
+        else:
+            run = 0
+            prev = raw
+        yield arr
 
 
 def record_seconds(cfg: AudioConfig, seconds: float) -> np.ndarray:

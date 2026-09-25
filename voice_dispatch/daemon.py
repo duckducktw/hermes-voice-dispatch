@@ -8,8 +8,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import signal
+import subprocess
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -29,6 +33,7 @@ class VoiceDispatcher:
         self.cfg = cfg
         self.dry_run = dry_run
         self._stop = False
+        self._last_recover = 0.0
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -89,30 +94,156 @@ class VoiceDispatcher:
     # R1：喚醒
     # ------------------------------------------------------------------
     def wait_for_wake(self) -> bool:
-        """開麥克風監聽雙拍手 + 喚醒詞。喚醒成功回傳 True。"""
-        with audio.input_stream(self.cfg.audio) as stream:
-            while not self._stop:
-                blocks = audio.read_blocks(stream, self.cfg.audio.blocksize)
+        """開麥克風監聽雙拍手 + 喚醒詞。喚醒成功回傳 True。
+
+        重點：**只開一條串流並長期持有**，健檢與凍結偵測都跑在同一條串流上。
+        本機 DMIC 的怪癖是「多開／重開常常只拿到凍結的直流」，所以另外開一條
+        去做健檢會把唯一正常的開檔搶走，反而讓監聽中的那條變成死的。
+        """
+        while not self._stop:
+            frozen = {"hit": False, "blocks": 0}
+            recovered = False
+            with audio.input_stream(self.cfg.audio) as stream:
+                self._log_stream_health(stream)
+                if self._stop:
+                    return False
+                blocks = audio.read_blocks_watched(
+                    stream,
+                    self.cfg.audio.blocksize,
+                    frozen_max_blocks=self.cfg.audio.frozen_max_blocks,
+                    on_frozen=self._frozen_cb(frozen),
+                )
                 detected = wake.run_clap_loop(
                     blocks, self.cfg, should_stop=lambda: self._stop
                 )
-                if not detected or self._stop:
+                if self._stop:
                     return False
-                log.info("偵測到雙拍手，錄喚醒詞視窗…")
-                samples = self._collect_seconds(stream, self.cfg.wake.window_sec)
-                try:
-                    transcript = stt.transcribe_samples(samples, self.cfg, logger=log)
-                except stt.SttError as exc:
-                    log.warning("喚醒詞 STT 失敗：%s", exc)
+                if frozen["hit"]:
+                    log.warning(
+                        "擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",
+                        frozen["blocks"],
+                    )
+                    recovered = True
+                elif not detected:
+                    log.info("監聽串流結束（裝置被搶走？）→ 重新開啟。")
+                else:
+                    log.info("偵測到雙拍手，錄喚醒詞視窗…")
+                    samples = self._collect_seconds(stream, self.cfg.wake.window_sec)
+                    try:
+                        transcript = stt.transcribe_samples(
+                            samples, self.cfg, logger=log
+                        )
+                    except stt.SttError as exc:
+                        log.warning("喚醒詞 STT 失敗：%s", exc)
+                        self._cooldown()
+                        continue
+                    log.info("喚醒詞視窗轉錄：%r", transcript)
+                    if wake.verify_wake_word(transcript, self.cfg):
+                        return True
+                    log.info("未命中喚醒詞，靜默重置。")
+                    # 靜默重置：不發任何音效/訊息，繼續監聽
                     self._cooldown()
-                    continue
-                log.info("喚醒詞視窗轉錄：%r", transcript)
-                if wake.verify_wake_word(transcript, self.cfg):
-                    return True
-                log.info("未命中喚醒詞，靜默重置。")
-                # 靜默重置：不發任何音效/訊息，繼續監聽
-                self._cooldown()
+            if recovered:
+                self._recover_audio()
         return False
+
+    # ------------------------------------------------------------------
+    # 麥克風健檢 / 凍結自動恢復
+    # ------------------------------------------------------------------
+    def _frozen_cb(self, state: dict):
+        """產生給 read_blocks_watched 的回呼，把凍結事件記進 state。"""
+
+        def cb(count: int) -> None:
+            state["hit"] = True
+            state["blocks"] = count
+
+        return cb
+
+    def _log_stream_health(self, stream) -> None:
+        """在「同一條」串流上量 crest，把「死訊號」講清楚。
+
+        不要為了健檢另外開 stream：本機多開會拿到凍結訊號，反而害到監聽中的
+        那條（2026-09-25 實際踩到的坑）。
+        """
+        try:
+            bs = self.cfg.audio.blocksize
+            for _ in range(3):  # 丟掉開檔暫態
+                stream.read(bs)
+            need = int(1.5 * self.cfg.audio.samplerate)
+            chunks: List[np.ndarray] = []
+            got = 0
+            while got < need:
+                data, _ = stream.read(bs)
+                arr = np.asarray(data, dtype=np.float64)[:, 0]
+                chunks.append(arr)
+                got += arr.size
+            d = np.concatenate(chunks) if chunks else np.zeros(0)
+            if d.size == 0:
+                return
+            rms = float(np.sqrt(np.mean(np.square(d))))
+            peak = float(np.max(np.abs(d)))
+            crest = peak / rms if rms > 1e-12 else float("inf")
+            log.info(
+                "麥克風健檢（同一條串流）：rms=%.5f peak=%.5f crest=%.2f",
+                rms, peak, crest,
+            )
+            if crest < 2.0 or peak < 0.01:
+                log.warning(
+                    "麥克風疑似死訊號（crest=%.2f peak=%.5f）→ 之後拍手不會有反應，"
+                    "問題在擷取路徑/驅動，不是拍手門檻。",
+                    crest, peak,
+                )
+            self._write_status(rms, peak, crest, frozen=False)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("麥克風健檢失敗：%s", exc)
+
+    def _write_status(self, rms: float, peak: float, crest: float, *, frozen: bool) -> None:
+        """寫狀態檔給外部 watchdog 讀（不讓 watchdog 自己去開麥克風）。"""
+        path = os.path.expanduser(self.cfg.audio.status_file)
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "ts": time.time(),
+                        "iso": datetime.now().isoformat(timespec="seconds"),
+                        "device": str(self.cfg.audio.device),
+                        "rms": rms,
+                        "peak": peak,
+                        "crest": crest,
+                        "frozen": frozen,
+                        "ok": (not frozen) and crest >= 2.0 and peak >= 0.01,
+                    },
+                    fh,
+                    ensure_ascii=False,
+                )
+        except OSError as exc:
+            log.debug("狀態檔寫入失敗：%s", exc)
+
+    def _recover_audio(self) -> None:
+        """凍結時重啟音訊堆疊。有冷卻，避免把使用者的音訊一直打斷。"""
+        wait = float(getattr(self.cfg.audio, "recover_cooldown_sec", 0.0) or 0.0)
+        since = time.monotonic() - self._last_recover
+        if self._last_recover and since < wait:
+            log.info("距上次音訊恢復 %.0fs（冷卻 %.0fs），先只重開串流。", since, wait)
+            return
+        argv = list(getattr(self.cfg.audio, "recover_command", []) or [])
+        if not argv:
+            return
+        self._last_recover = time.monotonic()
+        log.warning("執行音訊恢復：%s", " ".join(argv))
+        self._write_status(0.0, 0.0, 0.0, frozen=True)
+        try:
+            subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("音訊恢復失敗：%s", exc)
+            return
+        time.sleep(float(getattr(self.cfg.audio, "recover_wait_sec", 5.0) or 0.0))
+        # 重啟 PipeWire 後同一行程的 PortAudio 會卡住，一定要砍掉重練
+        audio.reset_portaudio()
+        log.info("音訊恢復完成，重新開啟串流。")
 
     def _cooldown(self) -> None:
         """誤觸後的冷卻，避免短時間內反覆觸發 STT（每次都要載一次模型）。
@@ -310,24 +441,33 @@ class VoiceDispatcher:
         # 把實際解析到的輸入裝置寫進 log：裝置指錯（例如指到收不到聲音的
         # 節點）時，症狀會是「在跑但永遠沒反應」，有這行才好查。
         log.info("輸入裝置解析結果：%s", audio.describe_device(self.cfg.audio.device))
-        # 啟動時就驗一次擷取路徑：本機踩過「process active、stream 開著、
-        # 卻永遠收不到訊號」的坑（凍結的直流，crest≈1），症狀是「在跑但沒反應」。
-        # 先講清楚，免得又去調拍手門檻。
-        m = audio.measure_level(self.cfg.audio, seconds=2.0)
-        if m:
-            log.info("麥克風健檢：rms=%.5f peak=%.5f crest=%.2f",
-                     m["rms"], m["peak"], m["crest"])
-        if m is None or m["crest"] < 2.0 or m["peak"] < 0.01:
-            log.warning("麥克風健檢未通過：%s", audio.level_verdict(m))
-            log.warning("拍手沒反應時，問題很可能在這裡（不是門檻）。"
-                        "用 --check-audio 複查、或換 audio.device。")
+        # 注意：健檢「不可以另外開一條 stream」。本機（acer-ubuntu）的 DMIC 多開／
+        # 重開常常只拿到凍結的直流，而正常的開檔只有一次；另外開一條去健檢會把
+        # 那次搶走，害真正在監聽的那條變成死的（2026-09-25 實際踩到）。
+        # 所以健檢改成在 wait_for_wake() 的同一條串流上做。
         try:
+            failures = 0
             while not self._stop:
                 rc = self.run_once()
                 if rc == 3:  # 音訊裝置不可用，沒必要空轉
                     return rc
+                if rc != 0:
+                    # 一定要退避！否則音訊掛掉時這裡會變成忙迴圈，把 journal 灌爆
+                    failures += 1
+                    delay = min(60.0, 2.0 ** min(failures, 5))
+                    log.warning("本輪失敗（rc=%s），%.0fs 後重試。", rc, delay)
+                    audio.reset_portaudio()
+                    self._sleep_interruptible(delay)
+                else:
+                    failures = 0
         except audio.AudioUnavailable as exc:
             log.error("音訊裝置不可用：%s", exc)
             return 3
         log.info("已停止。")
         return 0
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        """睡一段時間，可被 stop 訊號打斷。"""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not self._stop and time.monotonic() < deadline:
+            time.sleep(0.2)

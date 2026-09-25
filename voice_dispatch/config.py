@@ -38,6 +38,14 @@ class AudioConfig:
     # （同一測試 peak 0.54、環境底噪 0.0016）。系統預設來源會被 WirePlumber
     # 改動，所以這裡直接釘住正確的節點名，不依賴系統預設。
     device: Optional[Union[int, str]] = "HiFi__Mic1__source"
+    # 凍結偵測 / 自動恢復（本機 DMIC 會「開檔後立刻凍結」，見 README 疑難排解）
+    frozen_max_blocks: int = 240     # 連續多少個位元相同的區塊視為凍結（240×64ms≈15s）
+    recover_command: List[str] = field(default_factory=lambda: [
+        "systemctl", "--user", "restart", "wireplumber", "pipewire", "pipewire-pulse",
+    ])
+    recover_cooldown_sec: float = 120.0   # 兩次恢復之間最短間隔，避免一直重啟音訊
+    recover_wait_sec: float = 7.0         # 恢復後等裝置回來
+    status_file: str = "~/.local/state/hermes-voice-dispatch/mic-status.json"
     # 播放器候選，依序嘗試（會用 shlex 拆成 argv，{file} 由檔名取代）
     players: List[str] = field(default_factory=lambda: [
         "ffplay -nodisp -autoexit -loglevel quiet {file}",

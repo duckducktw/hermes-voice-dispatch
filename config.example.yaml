@@ -14,6 +14,18 @@ audio:
                                  #    HiFi__Mic2__source（收不到任何聲音的死節點），
                                  #    真正的內建麥克風是 HiFi__Mic1__source。
                                  #    用 --list-devices 或 tools/probe_levels.py 確認。
+                                 # 凍結自動恢復（本機 DMIC 會「開檔後立刻凍結」）：
+  frozen_max_blocks: 240         # 連續多少個位元相同的區塊視為凍結（240×64ms≈15s）
+  recover_command:               # 判定凍結時執行的恢復指令（重啟音訊堆疊）
+    - systemctl
+    - --user
+    - restart
+    - wireplumber
+    - pipewire
+    - pipewire-pulse
+  recover_cooldown_sec: 120.0    # 兩次恢復最短間隔，避免一直打斷使用者的音訊
+  recover_wait_sec: 7.0          # 恢復後等裝置回來
+  status_file: "~/.local/state/hermes-voice-dispatch/mic-status.json"
   players:                # 播放器候選，依序嘗試，{file} 會換成檔名
     - "ffplay -nodisp -autoexit -loglevel quiet {file}"
     - "paplay {file}"
