@@ -7,6 +7,7 @@ sounddevice 需要系統的 PortAudio 原生函式庫；若缺少會在 import �
 
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 import wave
@@ -111,15 +112,13 @@ def _arecord_fallback() -> Optional[str]:
 # --------------------------------------------------------------------------
 @contextmanager
 def input_stream(cfg: AudioConfig):
-    """開一個 InputStream 的 context manager，保證離開時關閉（避免資源洩漏）。"""
+    """開一個 InputStream 的 context manager，保證離開時關閉（避免資源洩漏）。
+
+    若設定的裝置不存在（換驅動、節點改名、裝置被拔），**退回系統預設**而不是整個
+    掛掉——本機的節點名會隨 SOF / legacy HDA 切換而整批改名（2026-09-25 實測）。
+    """
     sd = _import_sounddevice()
-    stream = sd.InputStream(
-        samplerate=cfg.samplerate,
-        channels=cfg.channels,
-        blocksize=cfg.blocksize,
-        dtype="float32",
-        device=cfg.device,
-    )
+    stream = _open_input(sd, cfg, cfg.device)
     stream.start()
     try:
         yield stream
@@ -128,6 +127,25 @@ def input_stream(cfg: AudioConfig):
             stream.stop()
         finally:
             stream.close()
+
+
+def _open_input(sd, cfg: AudioConfig, device):
+    kwargs = dict(
+        samplerate=cfg.samplerate,
+        channels=cfg.channels,
+        blocksize=cfg.blocksize,
+        dtype="float32",
+    )
+    try:
+        return sd.InputStream(device=device, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        if device is None:
+            raise
+        logging.getLogger("voice_dispatch").warning(
+            "設定的輸入裝置 %r 開不起來（%s）→ 退回系統預設來源；"
+            "請用 --list-devices 確認節點名。", device, exc,
+        )
+        return sd.InputStream(device=None, **kwargs)
 
 
 def reset_portaudio() -> None:

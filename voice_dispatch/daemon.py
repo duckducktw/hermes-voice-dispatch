@@ -34,6 +34,7 @@ class VoiceDispatcher:
         self.dry_run = dry_run
         self._stop = False
         self._last_recover = 0.0
+        self._recover_count = 0
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -193,6 +194,9 @@ class VoiceDispatcher:
                     "問題在擷取路徑/驅動，不是拍手門檻。",
                     crest, peak,
                 )
+            if crest >= 2.0:
+                # 健康檢查通過 → 把恢復失敗計數歸零（冷卻回到基準值）
+                self._recover_count = 0
             self._write_status(rms, peak, crest, frozen=False)
         except Exception as exc:  # noqa: BLE001
             log.warning("麥克風健檢失敗：%s", exc)
@@ -222,15 +226,21 @@ class VoiceDispatcher:
 
     def _recover_audio(self) -> None:
         """凍結時重啟音訊堆疊。有冷卻，避免把使用者的音訊一直打斷。"""
-        wait = float(getattr(self.cfg.audio, "recover_cooldown_sec", 0.0) or 0.0)
+        base = float(getattr(self.cfg.audio, "recover_cooldown_sec", 0.0) or 0.0)
+        if base <= 0:
+            return
+        # 連續失敗時冷卻倍增（上限 30 分鐘）：mic 真的壞掉時，不要每兩分鐘就打斷
+        # 一次使用者的音訊。健康檢查一通過就把計數歸零。
+        wait = min(base * (2 ** min(self._recover_count, 5)), 1800.0)
         since = time.monotonic() - self._last_recover
         if self._last_recover and since < wait:
-            log.info("距上次音訊恢復 %.0fs（冷卻 %.0fs），先只重開串流。", since, wait)
+            log.info("距上次音訊恢復 %.0fs（本次冷卻 %.0fs），先只重開串流。", since, wait)
             return
         argv = list(getattr(self.cfg.audio, "recover_command", []) or [])
         if not argv:
             return
         self._last_recover = time.monotonic()
+        self._recover_count += 1
         log.warning("執行音訊恢復：%s", " ".join(argv))
         self._write_status(0.0, 0.0, 0.0, frozen=True)
         try:
