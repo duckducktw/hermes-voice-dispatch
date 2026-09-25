@@ -85,6 +85,19 @@ class VoiceDispatcher:
             return None
         return self._silero
 
+    def _drain(self, stream, seconds: float) -> None:
+        """丟掉串流裡積壓的音訊（含播放 TTS 期間累積的）。
+
+        不做的話，開始錄需求時會先讀到我們自己剛剛播的提示語，
+        VAD 會把它當成使用者需求 → STT → 派工一個假任務（2026-09-25 實際踩到）。
+        """
+        need = int(max(0.0, seconds) * self.cfg.audio.samplerate)
+        bs = self.cfg.audio.blocksize
+        got = 0
+        while got < need and not self._stop:
+            data, _ = stream.read(bs)
+            got += int(np.asarray(data).size)
+
     def _record_utterance(self, stream) -> Optional[np.ndarray]:
         """能量 VAD 錄一段話。回傳樣本；前置靜音逾時回傳 None。
 
@@ -95,6 +108,10 @@ class VoiceDispatcher:
         seg = VadSegmenter(self.cfg.vad)
         blocksize = self.cfg.audio.blocksize
         samplerate = self.cfg.audio.samplerate
+        # 先排掉播放提示語期間積在緩衝裡的自家人聲（否則會錄到自己剛講的話）
+        self._drain(stream, self.cfg.vad.settle_sec)
+        if self._stop:
+            return None
         block_dur = blocksize / float(samplerate)
         keep_n = max(1, int(round(self.cfg.vad.preroll_keep_sec / block_dur)))
         pre: deque = deque(maxlen=keep_n)      # 語音開始前的滾動緩衝
@@ -129,11 +146,24 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R1：喚醒
     # ------------------------------------------------------------------
-    def _wait_for_wake_kws(self) -> bool:
-        """KWS 版喚醒：常開餵 80ms 區塊給神經網路關鍵詞模型，命中就回 True。"""
-        spotter = kws.WakeWordSpotter(
-            self.cfg.wake.kws_models, threshold=self.cfg.wake.kws_threshold, logger=log
+    def _make_spotter(self):
+        """依 `cfg.wake.kws_engine` 建立喚醒詞偵測器。"""
+        if self.cfg.wake.kws_engine == "openwakeword":
+            return kws.WakeWordSpotter(
+                self.cfg.wake.kws_models,
+                threshold=self.cfg.wake.kws_threshold,
+                logger=log,
+            )
+        return kws.VoskSpotter(
+            self.cfg.wake.vosk_model,
+            words=self.cfg.wake.vosk_words,
+            min_conf=self.cfg.wake.vosk_min_conf,
+            logger=log,
         )
+
+    def _wait_for_wake_kws(self) -> bool:
+        """KWS 版喚醒：常開餵音訊給關鍵詞偵測器，命中就回 True。"""
+        spotter = self._make_spotter()
         while not self._stop:
             frozen = {"hit": False, "blocks": 0}
             with audio.input_stream(self.cfg.audio) as stream:
@@ -150,8 +180,10 @@ class VoiceDispatcher:
                         return False
                     name = spotter.feed(block)
                     if name:
-                        log.info("喚醒詞命中：%s（分數 %.3f）",
-                                 name, spotter.latest.get(name, 0.0))
+                        extra = (spotter.latest.get(name, 0.0)
+                                 if isinstance(spotter.latest, dict)
+                                 else spotter.latest)
+                        log.info("喚醒詞命中：%s（%s）", name, extra)
                         return True
                 if frozen["hit"]:
                     log.warning("擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",
@@ -424,6 +456,21 @@ class VoiceDispatcher:
             == "disagree"
         )
 
+    def _looks_like_own_prompt(self, transcript: str) -> bool:
+        """轉錄內容是不是我們自己的提示語（回音殘留）？
+
+        縱使有 settle/drain，偶爾仍可能錄到自己的尾音；一旦把自己的台詞當成
+        需求派出去就是一個假任務（2026-09-25 實際發生：需求原文變成
+        「這次說大聲一點。」「我在聽。NO NO NO」）。
+        """
+        norm = normalize(transcript)
+        if len(norm) < 3:
+            return False
+        tts_cfg = self.cfg.tts
+        own = [tts_cfg.ok_prompt, tts_cfg.unclear_prompt, tts_cfg.give_up_prompt,
+               tts_cfg.dispatched_prompt, *tts_cfg.retry_prompts]
+        return any(norm == normalize(p) or norm in normalize(p) for p in own if p)
+
     def record_and_confirm(self, stream) -> Optional[str]:
         """錄需求 → STT → 複述（告知用，不等回覆）→ 交付。
 
@@ -439,6 +486,10 @@ class VoiceDispatcher:
         while retries <= self.cfg.confirm.max_retries and not self._stop:
             transcript = self.prompt_and_capture(stream, attempt=retries)
             if not transcript:
+                retries += 1
+                continue
+            if self._looks_like_own_prompt(transcript):
+                log.warning("轉錄像我們自己的提示語（%r）→ 疑似回音，當作沒聽到", transcript)
                 retries += 1
                 continue
             if self._is_retry_only(transcript):

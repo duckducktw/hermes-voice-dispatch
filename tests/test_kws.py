@@ -1,7 +1,14 @@
 """kws.py：喚醒詞偵測與 Silero VAD 的基本行為（不需麥克風）。"""
+import os
+
 import numpy as np
+import pytest
 
 from voice_dispatch import kws
+
+VOSK = os.path.expanduser(
+    "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
+)
 
 
 def test_silence_does_not_trigger_wake():
@@ -23,3 +30,11 @@ def test_silero_none_until_full_chunk():
     v = kws.SileroVad(0.5)
     assert v.feed(np.zeros(512, dtype=np.float32)) is None
     assert v.feed(np.zeros(1024, dtype=np.float32)) in (True, False)
+
+
+@pytest.mark.skipif(not os.path.isdir(VOSK), reason="需要 vosk 模型（未下載）")
+def test_vosk_silence_no_hit():
+    """Vosk 常開餵靜音不該命中喚醒詞。"""
+    sp = kws.VoskSpotter(VOSK, words=["hermes"])
+    for _ in range(20):
+        assert sp.feed(np.zeros(1024, dtype=np.float32)) is None

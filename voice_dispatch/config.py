@@ -89,6 +89,19 @@ class WakeConfig:
     # 想要「Hermes」需另外訓練自訂模型（openWakeWord 目前只支援英文喚醒詞）。
     kws_models: List[str] = field(default_factory=lambda: ["hey_jarvis"])
     kws_threshold: float = 0.5
+    # 喚醒引擎：
+    #   "vosk" (預設) = Vosk 限制詞彙解碼當關鍵詞偵測。**支援任意英文詞**
+    #       （所以能用「hermes」），免訓練、免 AccessKey。實測單次 0.05~0.08s，
+    #       對 4 段真實房間背景（共 56 秒）零誤觸。
+    #   "openwakeword" = 預訓練模型，不支援自訂詞（只有 hey_jarvis 等）。
+    kws_engine: str = "vosk"
+    vosk_model: str = "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
+    # 兩詞詞彙表比單詞表好：實測正例 5/5（單詞表只有 4/5，某個聲音漏判），
+    # 也避免「只有一個詞」時任何像語音的東西被強制對上。
+    # 信心度門檻 0.8 可擋掉近似音（實測 "The hurries of modern life"
+    # conf=0.58~0.69 被擋掉）；真同音詞（"Her mess…" conf=1.0）擋不掉，屬正常。
+    vosk_words: List[str] = field(default_factory=lambda: ["hermes", "hey hermes"])
+    vosk_min_conf: float = 0.8
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0
@@ -111,6 +124,11 @@ class VadConfig:
     use_silero: bool = True
     silero_threshold: float = 0.5
     preroll_keep_sec: float = 0.5        # 語音起點前額外保留的音訊（避免切掉字頭）
+    # 2026-09-25：錄需求前先排掉串流緩衝。TTS 播放期間我們不讀串流，
+    # PortAudio/pulse 會把那段音訊積在緩衝；不排掉的話，一開始錄就會先讀到
+    # **我們自己剛剛講的話**，VAD 把它當成使用者需求 → STT → 派工假任務
+    # （實測 log 的需求原文 = 它自己的台詞「這次說大聲一點。」「我在聽。」）。
+    settle_sec: float = 1.2
     preroll_timeout_sec: float = 8.0     # 前置靜音等待上限（都沒講話就放棄）
     trailing_silence_sec: float = 1.2    # 講完後連續靜音多久視為結束
     max_record_sec: float = 60.0         # 單次錄音最長

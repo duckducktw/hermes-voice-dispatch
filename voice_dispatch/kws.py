@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -89,6 +90,58 @@ class WakeWordSpotter:
                 if s >= self.threshold and hit is None:
                     hit = name
         return hit
+
+
+class VoskSpotter:
+    """用 Vosk 的「限制詞彙解碼」當關鍵詞偵測。
+
+    為什麼用它而不是 openWakeWord：openWakeWord 的預訓練模型不支援自訂詞
+    （只有 hey_jarvis / alexa …），要「hermes」得訓練自訂模型（Colab + GB 級
+    資料集）。Vosk 只要把解碼詞彙鎖成 `["hermes", "[unk]"]`，就等於關鍵詞
+    偵測——免訓練、免 AccessKey、支援任意英文詞。
+
+    實測（2026-09-25）：
+      "Hermes" / "Hey Hermes, restart the server" → 命中
+      "Good morning everyone" / "The weather is nice today" → 不命中
+      喇叭→手機麥克風播 "Hey Hermes" → 命中
+      4 段真實房間背景（共 56 秒）→ 零誤觸；單次耗時 0.05~0.08s（3 秒音檔）
+    """
+
+    def __init__(self, model_path: str, words=None, min_conf: float = 0.0, logger=None):
+        import os as _os
+        from vosk import KaldiRecognizer, Model, SetLogLevel
+
+        SetLogLevel(-1)                 # 別把 kaldi 的 log 灌進我們的 log
+        self.words = [w.lower() for w in (words or ["hermes"])]
+        self.min_conf = float(min_conf)
+        self._model = Model(_os.path.expanduser(model_path))
+        self._rec = KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
+        self._rec.SetWords(True)        # 要 per-word conf 才擋得掉近似音誤觸
+        self.latest = ""
+        if logger:
+            logger.info("喚醒詞引擎：vosk（詞彙 %s，信心度門檻 %.2f）", self.words, self.min_conf)
+
+    def feed(self, samples) -> Optional[str]:
+        """餵入音訊；命中喚醒詞回傳該詞，否則 None。
+
+        **只看 final result，不看 partial**：partial 沒有 per-word 信心度，
+        在只有 1~2 個詞的限制詞彙表下很容易把雜音「強制」解成喚醒詞
+        （2026-09-25 實測：啟動暫態就被解成 hermes 而誤觸）。
+        代價是判定要等這句講完（約 0.3~0.6 秒），換來的是不亂觸發。
+        """
+        pcm = _to_pcm16(samples)
+        if pcm.size == 0:
+            return None
+        if not self._rec.AcceptWaveform(pcm.tobytes()):
+            self.latest = json.loads(self._rec.PartialResult()).get("partial", "")
+            return None
+        data = json.loads(self._rec.Result())
+        self.latest = data.get("text", "")
+        for w in data.get("result") or []:
+            word = str(w.get("word", "")).lower()
+            if word in self.words and float(w.get("conf", 0.0)) >= self.min_conf:
+                return word
+        return None
 
 
 class SileroVad:
