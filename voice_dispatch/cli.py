@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="只做本地流程、印出將發送內容，不打 Discord、不 spawn hermes")
     p.add_argument("--list-devices", action="store_true", help="列出可用的麥克風裝置後結束")
+    p.add_argument("--check-audio", action="store_true",
+                   help="健檢麥克風擷取路徑（死訊號/crest 判定）後結束")
     p.add_argument("--log-level", default="INFO",
                    help="log 等級（DEBUG/INFO/WARNING/ERROR），預設 INFO")
     p.add_argument("--log-file", help="覆寫 log 檔路徑")
@@ -57,7 +59,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # dry-run 不碰網路，不需要 token；其餘模式（含 simulate 真跑）仍載入 token。
     # 注意：載入時即使找不到 token 也只是留 None，不會報錯（真的要用時才在 DiscordClient 檢查）。
-    need_token = not args.dry_run
+    need_token = not args.dry_run and not args.check_audio
     try:
         cfg: Config = load_config(args.config, load_token=need_token)
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
@@ -66,6 +68,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     log_file = args.log_file or cfg.resolved_log_file()
     setup_logging(args.log_level, log_file)
+
+    if args.check_audio:
+        m = audio.measure_level(cfg.audio, seconds=2.0)
+        print(f"輸入裝置：{audio.describe_device(cfg.audio.device)}")
+        if m:
+            print(f"  rms={m['rms']:.5f}  peak={m['peak']:.5f}  "
+                  f"crest={m['crest']:.2f}  samples={m['samples']}")
+        print(f"判定：{audio.level_verdict(m)}")
+        print("（crest < 2 = 死訊號，調門檻沒用，要換節點或修驅動；"
+              "正常講話 crest 應 5~8）")
+        ok = bool(m) and m["crest"] >= 2.0 and m["peak"] >= 0.01
+        return 0 if ok else 1
 
     dispatcher = _make_dispatcher(cfg, dry_run=args.dry_run)
 

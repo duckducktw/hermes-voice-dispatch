@@ -310,6 +310,17 @@ class VoiceDispatcher:
         # 把實際解析到的輸入裝置寫進 log：裝置指錯（例如指到收不到聲音的
         # 節點）時，症狀會是「在跑但永遠沒反應」，有這行才好查。
         log.info("輸入裝置解析結果：%s", audio.describe_device(self.cfg.audio.device))
+        # 啟動時就驗一次擷取路徑：本機踩過「process active、stream 開著、
+        # 卻永遠收不到訊號」的坑（凍結的直流，crest≈1），症狀是「在跑但沒反應」。
+        # 先講清楚，免得又去調拍手門檻。
+        m = audio.measure_level(self.cfg.audio, seconds=2.0)
+        if m:
+            log.info("麥克風健檢：rms=%.5f peak=%.5f crest=%.2f",
+                     m["rms"], m["peak"], m["crest"])
+        if m is None or m["crest"] < 2.0 or m["peak"] < 0.01:
+            log.warning("麥克風健檢未通過：%s", audio.level_verdict(m))
+            log.warning("拍手沒反應時，問題很可能在這裡（不是門檻）。"
+                        "用 --check-audio 複查、或換 audio.device。")
         try:
             while not self._stop:
                 rc = self.run_once()

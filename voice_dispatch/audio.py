@@ -220,3 +220,59 @@ def play_file(path: str, cfg: AudioConfig, logger=None) -> bool:
     if logger:
         logger.warning("所有播放器都無法播放：%s", path)
     return False
+
+
+# --------------------------------------------------------------------------
+# 擷取路徑健檢（死訊號偵測）
+# --------------------------------------------------------------------------
+def measure_level(cfg: AudioConfig, seconds: float = 2.0) -> Optional[dict]:
+    """開 stream 讀 seconds 秒，回傳 {rms, peak, crest, samples}；失敗回 None。
+
+    crest = peak/rms 是「死訊號 vs 活音訊」最有效的判準（不依賴當下有沒有人在出聲）：
+    - 凍結/壞掉的擷取路徑吐近乎常數的直流 → crest ≈ 1.0
+    - 真實音訊（連底噪）crest 至少 2，真人講話 5~8
+    """
+    try:
+        sd = _import_sounddevice()
+    except AudioUnavailable:
+        return None
+    chunks = []
+    try:
+        with sd.InputStream(
+            samplerate=cfg.samplerate,
+            channels=cfg.channels,
+            blocksize=cfg.blocksize,
+            dtype="float32",
+            device=cfg.device,
+        ) as stream:
+            need = int(seconds * cfg.samplerate)
+            got = 0
+            # 丟掉開檔瞬間的暫態（常見一根大尖波），否則 crest 會爆高
+            for _ in range(3):
+                stream.read(cfg.blocksize)
+            while got < need:
+                data, _overflowed = stream.read(cfg.blocksize)
+                arr = np.asarray(data, dtype=np.float64)[:, 0]
+                chunks.append(arr)
+                got += arr.size
+    except Exception:  # noqa: BLE001 - 裝置忙碌/開不起來都不該讓主流程崩潰
+        return None
+
+    d = np.concatenate(chunks) if chunks else np.zeros(0)
+    if d.size == 0:
+        return None
+    rms = float(np.sqrt(np.mean(np.square(d))))
+    peak = float(np.max(np.abs(d)))
+    crest = peak / rms if rms > 1e-12 else float("inf")
+    return {"rms": rms, "peak": peak, "crest": crest, "samples": int(d.size)}
+
+
+def level_verdict(m: Optional[dict]) -> str:
+    """把 measure_level 的結果翻成可行動的結論。"""
+    if m is None:
+        return "無法量測（裝置開不起來／被佔用）"
+    if m["crest"] < 2.0:
+        return "死訊號（凍結的直流）→ 路由/驅動問題，調門檻沒用"
+    if m["peak"] < 0.01:
+        return "串流活著但幾乎收不到聲音（沒插麥克風／硬體靜音／增益過低）"
+    return "有真實聲音"
