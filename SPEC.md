@@ -43,16 +43,17 @@
 
 ## 功能需求
 
-### R1 喚醒偵測（喊「Hey Jarvis」）
+### R1 喚醒偵測（喊「Hermes」）
 **2026-09-25 架構改版**：從「雙拍手 + 大喊 Hermes → STT 比對字串」改成真實
-語音助手的做法——常開跑一顆微小神經網路關鍵詞模型，**不對它做 STT**。
+語音助手的做法——常開跑關鍵詞偵測，**不對它做 STT**。
 
 1. 以 `sounddevice` 開 16kHz / 單聲道 / blocksize 1024 的 InputStream 持續讀取。
-2. 音訊重新切成 80ms（1280 samples）區塊，餵給 **openWakeWord** 關鍵詞模型
-   （`voice_dispatch/kws.py`）。命中分數 ≥ `wake.kws_threshold`（預設 0.5）
-   即喚醒成功，延遲 <0.1 秒。
-3. 預設模型 `hey_jarvis`（另有 alexa / hey_mycroft / hey_rhasspy / timer / weather）。
-   **不需要拍手、也不對喚醒詞做 STT。**
+2. 引擎：**Vosk 限制詞彙解碼**（`voice_dispatch/kws.py`，`wake.kws_engine="vosk"`）。
+   解碼詞彙鎖成 `["hermes", "hey hermes", "[unk]"]`，等同關鍵詞偵測，免訓練、
+   支援任意英文詞。只看 final result 的 per-word `conf`，須 ≥ `wake.vosk_min_conf`
+   （0.8）才命中——partial 沒有信心度，會被雜音「強制」解成喚醒詞。
+3. 另一引擎 `wake.kws_engine="openwakeword"`（預訓練 hey_jarvis 等）保留可切換，
+   但**不支援自訂詞**。
 4. 舊路徑保留成 `wake.mode="clap"` 僅作退路；預設 `wake.mode="kws"`。
 
 #### 為什麼廢掉舊路徑（2026-09-25 實測）
@@ -62,6 +63,9 @@
 - 短音訊 + 小聲時 STT 常吐幻覺（實測得到「感謝收看。」「那個更難,那個更難」），
   喚醒詞因此漏判。
 - 還要拍手，完全不像在跟人講話。
+- 順帶修掉「回音自我觸發」：TTS 播放期間不讀串流，pulse 會把那段音訊積在
+  緩衝，開始錄需求時先讀到的就是自己的提示語 → 被當成需求派工假任務。
+  見 R2 的 `vad.settle_sec` 與 `_looks_like_own_prompt()`。
 
 ### R2 語音引導 + 錄需求
 1. 喚醒成功 → 以 TTS 說「嗯，我在聽。」（`tts.ok_prompt` 可設定；
