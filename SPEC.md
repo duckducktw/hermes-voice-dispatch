@@ -68,12 +68,23 @@
   見 R2 的 `vad.settle_sec` 與 `_looks_like_own_prompt()`。
 
 ### R2 語音引導 + 錄需求
-1. 喚醒成功 → 以 TTS 說「嗯，我在聽。」（`tts.ok_prompt` 可設定；
-   beep 提示音預設關閉：`tts.beep_enabled=false`）
+1. 喚醒成功 → 播一次「咚咚」（`tts.prompt_mode="chime"`，預設），**不講話**；
+   聽完需求（有講或沒講逾時都算）→ 再播一次「咚咚」。這兩聲就是使用者要的
+   全部提示（2026-09-25 定案：「開始咚、結束咚」，TTS 全部拿掉）。
+   - 「咚咚」音源兩種（`tts.chime_source`）：
+     `"files"`＝直接播**蘋果原廠素材音檔**（`tts.chime_files`，正式用法）；
+     `"synth"`＝FM 調變合成（沒有素材的機器才用）。合成版被使用者退貨兩次
+     （「空洞的咚咚」→「這他媽是火車」），所以**結論是別自己合成，用原廠素材**。
+     - 素材不入 repo（版權），放 `~/.local/share/hermes-voice-dispatch/chime/`；
+       本機用哪一顆寫在 repo 的 `config.yaml`（systemd 用 `--config` 指過去）。
+     - 合成相關參數（`tts.chime_*`：FM 比／指數／泛音列／殘響…）保留但非主力。
+   - 要回舊行為（TTS 講 `ok_prompt`／`retry_prompts`／`dispatched_prompt`）→
+     `tts.prompt_mode="voice"`；舊的 beep（`tts.beep_enabled`）只在 voice 模式生效。
 2. 進入錄音：以 **Silero 神經網路 VAD** 偵測語音起訖（`vad.use_silero` 預設 true；
    退回 RMS 門檻則用 `vad.speech_rms_threshold`）—— 前置靜音等待最多 8 秒，
    偵測到語音後，連續靜音超過 1.2 秒即停止，最長 60 秒，最短 0.5 秒。
    另含 `vad.preroll_keep_sec`（0.5s）把判定前的字頭補回來。
+   `vad.settle_sec`（1.2s）會先排掉緩衝——提示音比它短，不會被錄進去。
 
 ### R3 逐字轉錄
 呼叫 `stt_scoped.sh <wav> -`，解析 JSON 的 `transcript`。

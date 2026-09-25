@@ -193,12 +193,45 @@ class TtsConfig:
     #       喚醒 → 咚（tone1）咚（tone2）；聽完需求（有講／沒講都算）→ 再一次咚咚。
     #   "voice"＝舊行為，用 edge-tts 講 ok_prompt / retry_prompts / dispatched_prompt。
     prompt_mode: str = "chime"
-    # 咚咚（兩聲下行雙音，像門鈴／提示音）。音量刻意比 beep 低，不刺耳。
-    chime_tone1_hz: float = 784.0   # G5（第一聲「咚」）
-    chime_tone2_hz: float = 523.25  # C5（第二聲「咚」，下行完全四度）
-    chime_tone_dur_sec: float = 0.16
-    chime_gap_sec: float = 0.07     # 兩聲之間的縫
-    chime_volume: float = 0.35
+    # 咚咚＝「有質感的」雙音提示。
+    # 兩次退貨記錄（2026-09-25）：
+    #   1. 純正弦 + 衰減 → 「空洞的咚咚」
+    #   2. 泛音列 + 雜訊敲擊瞬態（木琴/木魚/太鼓）→ 「這他媽是火車」
+    # 定案方向：**蘋果（iOS/macOS）那種感覺** = FM 調變鈴聲
+    #   （Glass / Marimba / Tri-tone / Note 都是 FM 合成，乾淨、明亮、無雜訊敲擊）。
+    #   y = sin(2πft + I(t)·sin(2π·f·R·t))，I 在數十毫秒內收乾 → 亮起音 + 純淨尾韻。
+    # 參數全部可調，預設＝Apple「Glass」感（非整數調變比 → 鐘／玻璃）。
+    chime_tone1_hz: float = 1174.66  # D6（第一聲「咚」）
+    chime_tone2_hz: float = 880.0    # A5（第二聲「咚」，下行五度）
+    chime_tone_dur_sec: float = 0.10
+    chime_gap_sec: float = 0.08      # 兩聲起音的間隔
+    chime_volume: float = 0.32
+    # FM 調變（蘋果系音色的核心）。fm_ratio=0 就退回純加法合成。
+    chime_fm_ratio: float = 1.41     # 非整數 → 玻璃/鐘；整數 1.0→馬林巴、2.0→清脆
+    chime_fm_index: float = 3.5      # 調變深度（越大起音越亮）
+    chime_fm_decay_sec: float = 0.045  # 指數收乾時間（蘋果音「乾淨」的關鍵）
+    # 加法泛音層（補厚度；蘋果系只留基頻，[比值, 振幅, 衰減倍率]）
+    chime_partials: List[List[float]] = field(default_factory=lambda: [
+        [1.00, 1.00, 1.00],
+    ])
+    chime_decay_sec: float = 0.35    # 基頻的衰減時間常數
+    chime_tail_sec: float = 0.55     # 尾韻長度（樂音自然收尾 + 殘響）
+    chime_detune_cents: float = 0.0  # 第二層微失諧（拍頻）；蘋果系乾淨 → 0
+    chime_attack_noise: float = 0.0  # 敲擊雜訊比例；蘋果系不要開（會變木頭／火車）
+    chime_reverb: float = 0.35       # 殘響濕度（0 = 乾扁的電腦音）
+    chime_reverb_taps: List[List[float]] = field(default_factory=lambda: [
+        [0.031, 0.30],               # [延遲秒數, 相對音量]
+        [0.057, 0.20],
+        [0.089, 0.12],
+    ])
+    # 音源：`"files"`＝播原廠素材音檔（**有素材就用這個**）；`"synth"`＝合成退路。
+    # 使用者 2026-09-25 兩次退貨合成版後定案：「你找找蘋果素材」
+    # → 用蘋果原廠音效（macOS aiff / iOS tones），存在
+    #   ~/.local/share/hermes-voice-dispatch/chime/raw/（**不入 repo，版權**）
+    chime_source: str = "synth"
+    # 要播的音檔（依序串接；單一檔案＝整顆 cue）。檔案不存在就自動退回合成。
+    chime_files: List[str] = field(default_factory=list)
+    chime_file_max_sec: float = 2.5  # 單一素材最長取用秒數（避免提示音太長）
 
 
 @dataclass

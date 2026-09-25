@@ -87,6 +87,12 @@ tts:
   chime_tone_dur_sec: 0.16
   chime_gap_sec: 0.07      # 兩聲之間的縫
   chime_volume: 0.35
+  # 音源：`"files"`＝播原廠素材音檔（**有素材就優先用這個**）；`"synth"`＝合成退路。
+  # 合成版被使用者退貨兩次（「空洞」「這他媽是火車」），所以正式用素材。
+  # 素材不入 repo（版權），放在使用者家目錄，路徑只在 config.yaml 裡出現。
+  chime_source: "synth"
+  chime_files: []            # 例：["~/.local/share/hermes-voice-dispatch/chime/cue_1_Glass_macOS.mp3"]
+  chime_file_max_sec: 2.5    # 單一素材最長取用秒數
 
 stt:
   scoped_script: "~/.hermes/scripts/voice_task/stt_scoped.sh"

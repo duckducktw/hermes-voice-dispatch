@@ -22,7 +22,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/Data/Dev/python/hermes-voice-dispatch
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.hermes/hermes-agent/venv/bin/python3 -m voice_dispatch
+# 本機設定（音色素材路徑等機器專屬值）放 repo 的 config.yaml，用 --config 指過去。
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python3 -m voice_dispatch --config %h/Data/Dev/python/hermes-voice-dispatch/config.yaml
 Restart=always
 RestartSec=3
 # 讓拍手偵測有即時性
