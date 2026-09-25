@@ -57,7 +57,7 @@ def describe_device(device) -> str:
         if device is None:
             info = sd.query_devices(kind="input")
             return f"(系統預設) {info['name']}"
-        info = sd.query_devices(device)
+        info = sd.query_devices(resolve_device(sd, device))
         return f"[{info['index']}] {info['name']}"
     except AudioUnavailable as exc:
         return f"(無法解析：{exc})"
@@ -129,6 +129,22 @@ def input_stream(cfg: AudioConfig):
             stream.close()
 
 
+def resolve_device(sd, device):
+    """把設定裡的裝置名解析成 sounddevice 認得的 index。"""
+    if device is None or isinstance(device, int):
+        return device
+    try:
+        sd.query_devices(device)
+        return device
+    except Exception:  # noqa: BLE001
+        pass
+    hits = [i for i, d in enumerate(sd.query_devices())
+            if d.get("max_input_channels", 0) > 0 and device in d.get("name", "")]
+    if hits:
+        return hits[0]
+    return device
+
+
 def _open_input(sd, cfg: AudioConfig, device):
     kwargs = dict(
         samplerate=cfg.samplerate,
@@ -136,6 +152,7 @@ def _open_input(sd, cfg: AudioConfig, device):
         blocksize=cfg.blocksize,
         dtype="float32",
     )
+    device = resolve_device(sd, device)
     try:
         return sd.InputStream(device=device, **kwargs)
     except Exception as exc:  # noqa: BLE001
