@@ -81,8 +81,17 @@ class ClapConfig:
 
 @dataclass
 class WakeConfig:
-    window_sec: float = 2.5         # 拍手後錄多久去比對喚醒詞
-    cooldown_sec: float = 10.0      # 喚醒詞沒過之後的冷卻，避免誤觸時反覆載入 STT
+    # 喚醒方式：
+    #   "kws"  = openWakeWord 神經網路關鍵詞模型（真實助手做法，推薦）
+    #   "clap" = 舊做法：拍手兩下 → 錄一段 → STT 比對字串（慢、易幻覺，只留作退路）
+    mode: str = "kws"
+    # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。
+    # 想要「Hermes」需另外訓練自訂模型（openWakeWord 目前只支援英文喚醒詞）。
+    kws_models: List[str] = field(default_factory=lambda: ["hey_jarvis"])
+    kws_threshold: float = 0.5
+    # ── mode="clap"（舊路徑）─────────────────────────────────────
+    window_sec: float = 2.5
+    cooldown_sec: float = 10.0
     keywords: List[str] = field(default_factory=lambda: [
         "hermes", "赫米斯", "赫密斯", "哈米斯",
     ])
@@ -95,7 +104,12 @@ class VadConfig:
     # 隔著桌面收音時你的聲音常常過不了 → VAD 太晚才開始（切掉字頭）
     # 或直接判定沒人講話 → 程式就一直在那裡重問需求。
     # 降到 0.012：距底噪還有 ~4 倍，但抓得到小聲的起頭。
-    speech_rms_threshold: float = 0.012  # 判定為語音的 RMS 門檻
+    speech_rms_threshold: float = 0.012  # 判定為語音的 RMS 門檻（use_silero=False 時才用）
+    # 2026-09-25：改用 Silero 神經網路 VAD 當預設端點偵測（見 kws.py）。
+    # RMS 門檻怎麼調都是蹺蹺板：太敏感會把冷氣／風扇當語音，太保守則隔著桌面
+    # 講話被判成「沒人講話」→ 程式一直重問需求。Silero 是訓練過的小模型，穩健得多。
+    use_silero: bool = True
+    silero_threshold: float = 0.5
     preroll_keep_sec: float = 0.5        # 語音起點前額外保留的音訊（避免切掉字頭）
     preroll_timeout_sec: float = 8.0     # 前置靜音等待上限（都沒講話就放棄）
     trailing_silence_sec: float = 1.2    # 講完後連續靜音多久視為結束

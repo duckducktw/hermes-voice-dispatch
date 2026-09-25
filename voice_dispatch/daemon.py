@@ -22,7 +22,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import audio, dispatch, stt, tts, wake
+from . import audio, dispatch, kws, stt, tts, wake
 from .config import Config
 from .discord_api import DiscordClient
 from .text import classify_confirmation, make_thread_name, normalize
@@ -39,6 +39,7 @@ class VoiceDispatcher:
         self._last_recover = 0.0
         self._recover_count = 0
         self._healthy_since = 0.0   # 連續健康起算點（見 _log_stream_health）
+        self._silero = None         # 惰性建立；False = 載入失敗，退回 RMS 門檻
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -70,6 +71,20 @@ class VoiceDispatcher:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(chunks)[:needed]
 
+    def _get_silero(self):
+        """惰性建立 Silero VAD；載入失敗就退回 RMS 門檻（回傳 None）。"""
+        if self._silero is None:
+            try:
+                self._silero = kws.SileroVad(
+                    self.cfg.vad.silero_threshold, logger=log
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Silero VAD 載入失敗（%s）→ 改用 RMS 門檻", exc)
+                self._silero = False
+        if self._silero is False:
+            return None
+        return self._silero
+
     def _record_utterance(self, stream) -> Optional[np.ndarray]:
         """能量 VAD 錄一段話。回傳樣本；前置靜音逾時回傳 None。
 
@@ -84,6 +99,7 @@ class VoiceDispatcher:
         keep_n = max(1, int(round(self.cfg.vad.preroll_keep_sec / block_dur)))
         pre: deque = deque(maxlen=keep_n)      # 語音開始前的滾動緩衝
         chunks: List[np.ndarray] = []
+        silero = self._get_silero()
         idx = 0
         for block in audio.read_blocks(stream, blocksize):
             if self._stop:
@@ -91,8 +107,10 @@ class VoiceDispatcher:
             t = idx * block_dur
             idx += 1
             rms = float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
+            # Silero 以 80ms 為單位推論，答案會比當前區塊晚一點（可接受）
+            voiced = silero.feed(block) if silero is not None else None
             was_started = seg.started
-            state = seg.feed(rms, t)
+            state = seg.feed(rms, t, voiced=voiced)
             if seg.started and not was_started:
                 chunks.extend(pre)             # 補回字頭
                 pre.clear()
@@ -111,7 +129,50 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R1：喚醒
     # ------------------------------------------------------------------
+    def _wait_for_wake_kws(self) -> bool:
+        """KWS 版喚醒：常開餵 80ms 區塊給神經網路關鍵詞模型，命中就回 True。"""
+        spotter = kws.WakeWordSpotter(
+            self.cfg.wake.kws_models, threshold=self.cfg.wake.kws_threshold, logger=log
+        )
+        while not self._stop:
+            frozen = {"hit": False, "blocks": 0}
+            with audio.input_stream(self.cfg.audio) as stream:
+                self._log_stream_health(stream)
+                if self._stop:
+                    return False
+                blocks = audio.read_blocks_watched(
+                    stream, self.cfg.audio.blocksize,
+                    frozen_max_blocks=self.cfg.audio.frozen_max_blocks,
+                    on_frozen=self._frozen_cb(frozen),
+                )
+                for block in blocks:
+                    if self._stop:
+                        return False
+                    name = spotter.feed(block)
+                    if name:
+                        log.info("喚醒詞命中：%s（分數 %.3f）",
+                                 name, spotter.latest.get(name, 0.0))
+                        return True
+                if frozen["hit"]:
+                    log.warning("擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",
+                                frozen["blocks"])
+                    self._recover_audio()
+        return False
+
     def wait_for_wake(self) -> bool:
+        """監聽喚醒詞；喚醒成功回傳 True。
+
+        依 `cfg.wake.mode` 選引擎：
+          - "kws"（預設）：openWakeWord 神經網路關鍵詞模型 = 真實助手做法。
+            常開推論、每 80ms 一次，命中延遲 <0.1s，**不需要拍手、也不對
+            喚醒詞做 STT**（舊做法的 5 秒延遲與幻覺就是這樣來的）。
+          - "clap"：舊做法（拍手兩下 → 錄一段 → STT 比對字串），只留作退路。
+        """
+        if self.cfg.wake.mode == "kws":
+            return self._wait_for_wake_kws()
+        return self._wait_for_wake_clap()
+
+    def _wait_for_wake_clap(self) -> bool:
         """開麥克風監聽雙拍手 + 喚醒詞。喚醒成功回傳 True。
 
         重點：**只開一條串流並長期持有**，健檢與凍結偵測都跑在同一條串流上。

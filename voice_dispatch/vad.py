@@ -49,9 +49,11 @@ class VadSegmenter:
     def started(self) -> bool:
         return self._started
 
-    def feed(self, rms: float, t: float) -> VadState:
+    def feed(self, rms: float, t: float, voiced: Optional[bool] = None) -> VadState:
         """餵入一個區塊的 RMS 與時間戳（秒），回傳目前狀態。
 
+        voiced 有明確值時直接採用（例如改用 Silero 神經網路 VAD 的判定），
+        否則用 `speech_rms_threshold` 這個 RMS 門檻判斷。
         一旦回傳 DONE / TIMEOUT，之後再呼叫會維持該終態。
         """
         cfg = self.cfg
@@ -62,7 +64,8 @@ class VadSegmenter:
         if self._first_t is None:
             self._first_t = t
 
-        voiced = rms >= cfg.speech_rms_threshold
+        if voiced is None:
+            voiced = rms >= cfg.speech_rms_threshold
 
         if not self._started:
             if voiced:
