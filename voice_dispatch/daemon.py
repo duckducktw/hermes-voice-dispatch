@@ -161,30 +161,44 @@ class VoiceDispatcher:
 
         return cb
 
-    def _log_stream_health(self, stream) -> None:
+    def _log_stream_health(self, stream, attempts: int = 6) -> None:
         """在「同一條」串流上量 crest，把「死訊號」講清楚。
 
         不要為了健檢另外開 stream：本機多開會拿到凍結訊號，反而害到監聽中的
         那條（2026-09-25 實際踩到的坑）。
+
+        手機麥克風（PhoneMic）是 on-demand 的：bridge 要約 1 秒才會把串流接上，
+        開機瞬間量到的是數位靜音。所以像死訊號時要「等一下再重試」，不要第一次
+        就判死（2026-09-25 實測：每次重啟都誤報死訊號）。
         """
         try:
             bs = self.cfg.audio.blocksize
-            for _ in range(3):  # 丟掉開檔暫態
-                stream.read(bs)
             need = int(1.5 * self.cfg.audio.samplerate)
-            chunks: List[np.ndarray] = []
-            got = 0
-            while got < need:
-                data, _ = stream.read(bs)
-                arr = np.asarray(data, dtype=np.float64)[:, 0]
-                chunks.append(arr)
-                got += arr.size
-            d = np.concatenate(chunks) if chunks else np.zeros(0)
-            if d.size == 0:
-                return
-            rms = float(np.sqrt(np.mean(np.square(d))))
-            peak = float(np.max(np.abs(d)))
-            crest = peak / rms if rms > 1e-12 else float("inf")
+            rms, peak = 0.0, 0.0
+            crest = float("inf")
+            for attempt in range(max(1, attempts)):
+                if attempt:
+                    time.sleep(2.0)                      # 等 on-demand 麥克風接上
+                for _ in range(3):                       # 丟掉開檔暫態
+                    stream.read(bs)
+                chunks: List[np.ndarray] = []
+                got = 0
+                while got < need:
+                    data, _ = stream.read(bs)
+                    arr = np.asarray(data, dtype=np.float64)[:, 0]
+                    chunks.append(arr)
+                    got += arr.size
+                d = np.concatenate(chunks) if chunks else np.zeros(0)
+                if d.size:
+                    rms = float(np.sqrt(np.mean(np.square(d))))
+                    peak = float(np.max(np.abs(d)))
+                    crest = peak / rms if rms > 1e-12 else float("inf")
+                    if crest >= 2.0 and peak >= 0.01:
+                        break
+                log.info(
+                    "麥克風健檢第 %d 次仍無訊號（crest=%.2f peak=%.5f）→ 2 秒後重試",
+                    attempt + 1, crest, peak,
+                )
             log.info(
                 "麥克風健檢（同一條串流）：rms=%.5f peak=%.5f crest=%.2f",
                 rms, peak, crest,

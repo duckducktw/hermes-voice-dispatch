@@ -32,12 +32,13 @@ class AudioConfig:
     blocksize: int = 1024           # 每個讀取區塊的樣本數
     # 輸入裝置：可給 sounddevice 的 index(int) 或裝置名稱子字串(str)；
     # None = 系統預設來源。
-    # 2026-09-25 實測：本機（acer-ubuntu）的 PipeWire 預設來源指向
-    # HiFi__Mic2__source，而那是「收不到任何聲音」的節點（喇叭放 1kHz 大聲
-    # 音時 peak rms 仍只有 0.0003）；內建陣列麥克風其實是 HiFi__Mic1__source
-    # （同一測試 peak 0.54、環境底噪 0.0016）。系統預設來源會被 WirePlumber
-    # 改動，所以這裡直接釘住正確的節點名，不依賴系統預設。
-    device: Optional[Union[int, str]] = "HiFi__Mic1__source"
+    # 2026-09-25 定案：本機（acer-ubuntu）**內建擷取路徑全部失效**——Mic1/Mic2 與
+    # 所有 ALSA capture 裝置都是「開檔約 1 秒後凍結成直流」的罐頭緩衝（上游
+    # thesofproject/sof#11216，軟體層已掃完無解）。故改用手機麥克風：
+    # `PhoneMic` 是 phone-mic-bridge 建出的虛擬來源（scrcpy --audio-source=
+    # mic-unprocessed → null sink → remap），bridge 偵測到有人開麥時自動拉起。
+    # 釘死裝置名，不依賴會被 WirePlumber 改動的系統預設。
+    device: Optional[Union[int, str]] = "PhoneMic"
     # 凍結偵測 / 自動恢復（本機 DMIC 會「開檔後立刻凍結」，見 README 疑難排解）
     frozen_max_blocks: int = 240     # 連續多少個位元相同的區塊視為凍結（240×64ms≈15s）
     # 凍結時的「破壞性」恢復指令。**預設關閉（空清單）**：本機 mic 凍結是 SOF DMIC
