@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import time
+from collections import deque
 from datetime import datetime
 from typing import List, Optional
 
@@ -70,11 +71,18 @@ class VoiceDispatcher:
         return np.concatenate(chunks)[:needed]
 
     def _record_utterance(self, stream) -> Optional[np.ndarray]:
-        """能量 VAD 錄一段話。回傳樣本；前置靜音逾時回傳 None。"""
+        """能量 VAD 錄一段話。回傳樣本；前置靜音逾時回傳 None。
+
+        含 pre-roll：語音起點前多保留 `preroll_keep_sec` 秒的滾動緩衝，
+        避免「VAD 判定得比人開口晚」把字頭切掉——手機 mic 隔著桌面收音時，
+        起頭那幾個字常常過不了門檻，切掉字頭就很容易被 STT 轉成幻覺。
+        """
         seg = VadSegmenter(self.cfg.vad)
         blocksize = self.cfg.audio.blocksize
         samplerate = self.cfg.audio.samplerate
         block_dur = blocksize / float(samplerate)
+        keep_n = max(1, int(round(self.cfg.vad.preroll_keep_sec / block_dur)))
+        pre: deque = deque(maxlen=keep_n)      # 語音開始前的滾動緩衝
         chunks: List[np.ndarray] = []
         idx = 0
         for block in audio.read_blocks(stream, blocksize):
@@ -83,9 +91,15 @@ class VoiceDispatcher:
             t = idx * block_dur
             idx += 1
             rms = float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
+            was_started = seg.started
             state = seg.feed(rms, t)
+            if seg.started and not was_started:
+                chunks.extend(pre)             # 補回字頭
+                pre.clear()
             if seg.started:
                 chunks.append(block)
+            else:
+                pre.append(block)
             if state == VadState.DONE:
                 break
             if state == VadState.TIMEOUT:
@@ -304,20 +318,36 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R2 + R3 + R4：錄需求 → 轉錄 → 回述確認
     # ------------------------------------------------------------------
-    def prompt_and_capture(self, stream) -> Optional[str]:
-        """播提示音 + TTS 引導 → 錄需求 → STT。回傳轉錄字串或 None。"""
-        tts.play_beep(self.cfg, logger=log)
-        tts.speak(self.cfg.tts.ok_prompt, self.cfg, logger=log)
+    def prompt_and_capture(self, stream, attempt: int = 0) -> Optional[str]:
+        """播提示音 + TTS 引導 → 錄需求 → STT。回傳轉錄字串或 None。
+
+        attempt=0 講第一次的引導語；attempt>0 講「重問」那一組，
+        每次換一句（不要像機器人一樣重播同一句）。
+        """
+        if self.cfg.tts.beep_enabled:
+            tts.play_beep(self.cfg, logger=log)
+        if attempt:
+            lines = self.cfg.tts.retry_prompts or [self.cfg.tts.ok_prompt]
+            tts.speak(lines[(attempt - 1) % len(lines)], self.cfg, logger=log)
+        else:
+            tts.speak(self.cfg.tts.ok_prompt, self.cfg, logger=log)
         samples = self._record_utterance(stream)
         if samples is None or samples.size == 0:
-            log.info("沒有錄到語音（前置靜音逾時）。")
+            log.info("沒有錄到語音（前置靜音逾時）→ 第 %d 次嘗試", attempt + 1)
             return None
+        dur = samples.size / float(self.cfg.audio.samplerate)
+        log.info("需求錄音：%.2fs（第 %d 次嘗試）→ 送 STT", dur, attempt + 1)
         try:
             transcript = stt.transcribe_samples(samples, self.cfg, logger=log)
         except stt.SttError as exc:
             log.error("需求 STT 失敗：%s", exc)
             return None
-        return transcript.strip() or None
+        text = transcript.strip()
+        if not text:
+            log.warning("需求 STT 回空字串（錄到 %.2fs）→ 當作沒聽到", dur)
+            return None
+        log.info("需求轉錄：%r", text)
+        return text
 
     def _is_retry_only(self, transcript: str) -> bool:
         """整句就只是否定／要求重說嗎？
@@ -346,13 +376,12 @@ class VoiceDispatcher:
         """
         retries = 0
         while retries <= self.cfg.confirm.max_retries and not self._stop:
-            transcript = self.prompt_and_capture(stream)
+            transcript = self.prompt_and_capture(stream, attempt=retries)
             if not transcript:
                 retries += 1
                 continue
             if self._is_retry_only(transcript):
                 log.info("需求只有否定／重來詞（%r）→ 重錄。", transcript)
-                tts.speak(self.cfg.tts.unclear_prompt, self.cfg, logger=log)
                 retries += 1
                 continue
             tts.speak(
@@ -360,6 +389,7 @@ class VoiceDispatcher:
                 self.cfg, logger=log,
             )
             return transcript
+        tts.speak(self.cfg.tts.give_up_prompt, self.cfg, logger=log)
         log.info("超過重試上限，放棄本輪。")
         return None
 

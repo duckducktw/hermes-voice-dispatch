@@ -90,8 +90,14 @@ class WakeConfig:
 
 @dataclass
 class VadConfig:
-    speech_rms_threshold: float = 0.02   # 判定為語音的 RMS 門檻
-    preroll_timeout_sec: float = 6.0     # 前置靜音等待上限（都沒講話就放棄）
+    # 2026-09-25 校準（手機麥克風 + PhoneMic 增益 150%）：
+    # 環境底噪 rms 實測 0.00275。原本 0.02 是照筆電近場 mic 訂的，
+    # 隔著桌面收音時你的聲音常常過不了 → VAD 太晚才開始（切掉字頭）
+    # 或直接判定沒人講話 → 程式就一直在那裡重問需求。
+    # 降到 0.012：距底噪還有 ~4 倍，但抓得到小聲的起頭。
+    speech_rms_threshold: float = 0.012  # 判定為語音的 RMS 門檻
+    preroll_keep_sec: float = 0.5        # 語音起點前額外保留的音訊（避免切掉字頭）
+    preroll_timeout_sec: float = 8.0     # 前置靜音等待上限（都沒講話就放棄）
     trailing_silence_sec: float = 1.2    # 講完後連續靜音多久視為結束
     max_record_sec: float = 60.0         # 單次錄音最長
     min_record_sec: float = 0.5          # 單次錄音最短（低於此不算數）
@@ -104,7 +110,9 @@ class ConfirmConfig:
     # record_sec（不再另外錄一段確認音）、max_unclear（不再有 unknown 迴圈）。
     # 真正還在用的只有 max_retries（需求重錄上限）。
     record_sec: float = 3.0              # 回述確認時錄音長度
-    max_retries: int = 3                 # 需求重錄上限
+    # 2026-09-25：3 → 2。使用者反饋「一直卡在問我需求」——重試太多次會讓它
+    # 像壞掉的答錄機。現在最多問 3 次（第 1 次 + 2 次重問），而且每次換句話說。
+    max_retries: int = 2                 # 需求重錄上限
     max_unclear: int = 2                 # 連續無法判定的上限
     agree_words: List[str] = field(default_factory=lambda: [
         "對", "是", "好", "沒錯", "正確", "可以", "ok", "go", "嗯", "yes",
@@ -117,13 +125,20 @@ class ConfirmConfig:
 @dataclass
 class TtsConfig:
     voice: str = "zh-CN-XiaoyiNeural"
-    ok_prompt: str = "OK，請說出你的需求。"
-    # 2026-09-25 起確認輪不再阻塞（不再等人說「對」），文案改成純告知。
-    confirm_template: str = "我理解成：{transcript}，直接派工。"
-    unclear_prompt: str = "好的，請重新說一次需求。"
-    give_up_prompt: str = "我先放棄，請再說一次。"
-    dispatched_prompt: str = "好的，已經派工出去了。"
-    # beep 提示音（用 numpy 合成正弦波，不需外部音檔）
+    # 2026-09-25：文案改成「像在跟人講話」——短、口語、而且**每次重問換一句**，
+    # 不要像機器人一樣重播同一句（使用者反饋「一直卡在問我需求」＋「不夠自然」）。
+    ok_prompt: str = "嗯，我在聽。"
+    retry_prompts: List[str] = field(default_factory=lambda: [
+        "沒聽到，再說一次？",
+        "嗯？這次說大聲一點。",
+        "我這邊還是沒收到，靠近一點說？",
+    ])
+    # 複述：純告知，不等待回覆
+    confirm_template: str = "好，「{transcript}」，我去處理。"
+    unclear_prompt: str = "好，那你再說一次。"
+    give_up_prompt: str = "那我先等你，需要的時候再叫我。"
+    dispatched_prompt: str = "好，我去處理。"
+    beep_enabled: bool = False      # 機器感的「嗶」預設關掉（TTS 本身就是提示）
     beep_freq: float = 880.0
     beep_dur_sec: float = 0.18
     beep_volume: float = 0.3
