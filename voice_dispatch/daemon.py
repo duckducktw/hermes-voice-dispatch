@@ -520,6 +520,11 @@ class VoiceDispatcher:
         while retries <= self.cfg.confirm.max_retries and not self._stop:
             transcript = self.prompt_and_capture(stream, attempt=retries)
             if not transcript:
+                # 沒收到錄音（沒講話／VAD 逾時）：使用者要「就翻過來咚懂、然後結束」，
+                # 不要在那裡反覆重問（重問會多出一堆提示音）。預設不重試。
+                if not self.cfg.confirm.retry_on_no_speech:
+                    log.info("沒收到錄音 → 結束本輪（不重試；結束音已響過）")
+                    break
                 retries += 1
                 continue
             if self._looks_like_own_prompt(transcript):

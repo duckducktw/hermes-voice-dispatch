@@ -78,3 +78,28 @@ def test_voice_mode_still_speaks(monkeypatch):
     d._cue_start(0)
     d._cue_end()
     assert calls == [("speak", None)]
+
+
+# --------------------------------------------------------------------------
+# 「沒收到錄音就結束，不要反覆重問」（使用者：其他時間不要有聲音）
+# --------------------------------------------------------------------------
+def test_no_speech_ends_round_without_retry(monkeypatch):
+    calls = []
+    d = VoiceDispatcher(Config(), dry_run=True)
+    monkeypatch.setattr(
+        d, "prompt_and_capture", lambda stream, attempt=0: calls.append(attempt) or None
+    )
+    assert d.record_and_confirm(object()) is None
+    assert calls == [0], "沒收到錄音時不該重試（會多出一堆提示音）"
+
+
+def test_no_speech_retries_when_explicitly_enabled(monkeypatch):
+    calls = []
+    cfg = Config()
+    cfg.confirm.retry_on_no_speech = True
+    d = VoiceDispatcher(cfg, dry_run=True)
+    monkeypatch.setattr(
+        d, "prompt_and_capture", lambda stream, attempt=0: calls.append(attempt) or None
+    )
+    assert d.record_and_confirm(object()) is None
+    assert calls == [0, 1, 2], "開啟重試時仍要用 max_retries"
