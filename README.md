@@ -123,7 +123,18 @@ $PY -m voice_dispatch --config config.yaml
 
 校正步驟：
 
-1. **先看背景有多吵**：在你平常的環境放著，觀察 log（`--log-level DEBUG`）。
+0. **先確認這顆裝置真的有訊號**（最重要，跳過這步最容易白忙）：
+
+   ```bash
+   $PY tools/probe_levels.py            # 量環境底噪
+   $PY tools/probe_levels.py --loopback # 從喇叭放 1kHz，驗證麥克風收得到
+   ```
+
+   若 `--loopback` 的 max 仍是接近 0，代表**這顆裝置根本是死的**，換一顆
+   （`--list` 看有哪些，再 `--device <名稱或index>` 試）。本機就踩過這個坑：
+   PipeWire 預設來源 `HiFi__Mic2__source` 是死的（3.5mm 耳麥孔），
+   內建麥克風其實是 `HiFi__Mic1__source`。
+1. **看背景有多吵**：在你平常的環境放著，觀察 log（`--log-level DEBUG`）。
 2. **太難觸發（拍了沒反應）**：
    - 調低 `clap.threshold_mult`（例如 4.0 → 3.0）。
    - 調低 `clap.abs_floor`（例如 0.05 → 0.03），但太低容易被講話/關門誤觸。
@@ -165,6 +176,7 @@ journalctl --user -u voice-dispatch.service -f
 
 | 症狀 | 可能原因 / 解法 |
 | --- | --- |
+| **在跑但拍手永遠沒反應** | 輸入裝置指到收不到聲音的節點。用 `tools/probe_levels.py --loopback` 驗證；本機預設來源是死的 `HiFi__Mic2__source`，要釘 `audio.device: "HiFi__Mic1__source"`。 |
 | `PortAudio library not found` | 安裝 `sudo apt install libportaudio2`。`--list-devices` 會自動退化用 `arecord -l`。 |
 | `--list-devices` 找不到麥克風 | 用 `arecord -l` 確認硬體；在 config `audio.device` 指定正確 index。 |
 | 拍手沒反應 / 一直誤觸 | 見上方「拍手門檻校正」。 |
@@ -222,4 +234,9 @@ voice_dispatch/
 ├── discord_api.py  # Discord REST
 ├── dispatch.py     # 組 prompt + 背景 spawn hermes
 └── daemon.py       # 主狀態機
+```
+
+```
+tools/
+└── probe_levels.py # 麥克風電平探針（校正門檻、驗證裝置真的有訊號）
 ```

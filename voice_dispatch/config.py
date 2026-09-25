@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 try:
     import yaml  # type: ignore
@@ -30,7 +30,14 @@ class AudioConfig:
     samplerate: int = 16000          # 取樣率（Hz）
     channels: int = 1               # 單聲道
     blocksize: int = 1024           # 每個讀取區塊的樣本數
-    device: Optional[int] = None    # 輸入裝置 index；None = 系統預設
+    # 輸入裝置：可給 sounddevice 的 index(int) 或裝置名稱子字串(str)；
+    # None = 系統預設來源。
+    # 2026-09-25 實測：本機（acer-ubuntu）的 PipeWire 預設來源指向
+    # HiFi__Mic2__source，而那是「收不到任何聲音」的節點（喇叭放 1kHz 大聲
+    # 音時 peak rms 仍只有 0.0003）；內建陣列麥克風其實是 HiFi__Mic1__source
+    # （同一測試 peak 0.54、環境底噪 0.0016）。系統預設來源會被 WirePlumber
+    # 改動，所以這裡直接釘住正確的節點名，不依賴系統預設。
+    device: Optional[Union[int, str]] = "HiFi__Mic1__source"
     # 播放器候選，依序嘗試（會用 shlex 拆成 argv，{file} 由檔名取代）
     players: List[str] = field(default_factory=lambda: [
         "ffplay -nodisp -autoexit -loglevel quiet {file}",
@@ -83,7 +90,7 @@ class ConfirmConfig:
 
 @dataclass
 class TtsConfig:
-    voice: str = "zh-TW-HsiaoChenNeural"
+    voice: str = "zh-CN-XiaoyiNeural"
     ok_prompt: str = "OK，請說出你的需求。"
     confirm_template: str = "我理解成：{transcript}。對嗎？"
     unclear_prompt: str = "抱歉我沒聽清楚，請再說一次要或不要。"

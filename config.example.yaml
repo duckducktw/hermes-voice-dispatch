@@ -9,7 +9,11 @@ audio:
   samplerate: 16000       # 取樣率（Hz）
   channels: 1             # 單聲道
   blocksize: 1024         # 每區塊樣本數
-  device: null            # 輸入裝置 index；null = 系統預設（用 --list-devices 查）
+  device: "HiFi__Mic1__source"   # 輸入裝置：可填 index(int) 或名稱子字串(str)；null = 系統預設來源
+                                 # ⚠️ 不要只靠系統預設！本機 PipeWire 預設來源是
+                                 #    HiFi__Mic2__source（收不到任何聲音的死節點），
+                                 #    真正的內建麥克風是 HiFi__Mic1__source。
+                                 #    用 --list-devices 或 tools/probe_levels.py 確認。
   players:                # 播放器候選，依序嘗試，{file} 會換成檔名
     - "ffplay -nodisp -autoexit -loglevel quiet {file}"
     - "paplay {file}"
@@ -48,7 +52,10 @@ confirm:                  # 回述確認
   disagree_words: ["不", "錯", "重講", "再說", "重來", "no"]
 
 tts:
-  voice: "zh-TW-HsiaoChenNeural"
+  voice: "zh-CN-XiaoyiNeural"
+  # 其他不錯的：zh-TW-HsiaoYuNeural / zh-TW-YunJheNeural / zh-CN-XiaoxiaoNeural /
+  #             zh-CN-YunxiNeural / zh-CN-YunyangNeural
+  # 列出全部：edge-tts --list-voices | grep zh
   ok_prompt: "OK，請說出你的需求。"
   confirm_template: "我理解成：{transcript}。對嗎？"
   unclear_prompt: "抱歉我沒聽清楚，請再說一次要或不要。"

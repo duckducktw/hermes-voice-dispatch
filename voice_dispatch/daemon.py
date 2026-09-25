@@ -307,6 +307,9 @@ class VoiceDispatcher:
         """常駐迴圈，直到收到停止訊號。"""
         self.install_signal_handlers()
         log.info("hermes-voice-dispatch 啟動，開始監聽…")
+        # 把實際解析到的輸入裝置寫進 log：裝置指錯（例如指到收不到聲音的
+        # 節點）時，症狀會是「在跑但永遠沒反應」，有這行才好查。
+        log.info("輸入裝置解析結果：%s", audio.describe_device(self.cfg.audio.device))
         try:
             while not self._stop:
                 rc = self.run_once()

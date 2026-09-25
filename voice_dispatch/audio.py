@@ -46,6 +46,24 @@ def list_input_devices() -> List[dict]:
     return result
 
 
+def describe_device(device) -> str:
+    """把設定裡的輸入裝置解析成人類可讀字串（給啟動 log 用）。
+
+    裝置指錯時症狀是「程式在跑但永遠沒反應」，有這行才查得動。
+    """
+    try:
+        sd = _import_sounddevice()
+        if device is None:
+            info = sd.query_devices(kind="input")
+            return f"(系統預設) {info['name']}"
+        info = sd.query_devices(device)
+        return f"[{info['index']}] {info['name']}"
+    except AudioUnavailable as exc:
+        return f"(無法解析：{exc})"
+    except Exception as exc:  # noqa: BLE001
+        return f"(無法解析 {device!r}：{exc})"
+
+
 def format_device_list() -> str:
     """把輸入裝置整理成人類可讀字串。
 
