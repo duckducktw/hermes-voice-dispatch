@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-voice-dispatch"
+version = "0.1.0"
+description = "Linux 筆電上的語音派工守護程式（拍手兩下 + 喊 Hermes 喚醒）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=2.0",
+    "sounddevice>=0.5",
+    "edge-tts>=7.0",
+    "faster-whisper>=1.2",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+voice-dispatch = "voice_dispatch.cli:main"
+
+[tool.setuptools]
+packages = ["voice_dispatch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

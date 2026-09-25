@@ -1,0 +1,101 @@
+# hermes-voice-dispatch 設定範例
+# 複製成 config.yaml（或任意路徑）後用 --config 指定。
+# 這裡列出的值就是程式內建預設值；只需覆寫你要改的鍵即可，未列鍵沿用預設。
+
+# 主 log 檔（daemon 生命週期）
+log_file: "~/.local/state/hermes-voice-dispatch/dispatch.log"
+
+audio:
+  samplerate: 16000       # 取樣率（Hz）
+  channels: 1             # 單聲道
+  blocksize: 1024         # 每區塊樣本數
+  device: null            # 輸入裝置 index；null = 系統預設（用 --list-devices 查）
+  players:                # 播放器候選，依序嘗試，{file} 會換成檔名
+    - "ffplay -nodisp -autoexit -loglevel quiet {file}"
+    - "paplay {file}"
+    - "aplay -q {file}"
+
+clap:                     # 雙拍手偵測（校正方式見 README）
+  rms_window_sec: 5.0     # 自適應門檻的觀察視窗（取中位數）
+  threshold_mult: 4.0     # RMS 需超過「近期中位數 × 此倍數」
+  abs_floor: 0.05         # RMS 絕對下限（安靜環境防誤判）
+  abs_ceil: 1.2           # RMS 絕對上限（破音/雜訊排除）
+  min_gap_sec: 0.12       # 兩次拍手最短間隔
+  max_gap_sec: 1.5        # 兩次拍手最長間隔
+  refractory_sec: 0.08    # 一次瞬變後的不反應期
+
+wake:
+  window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
+  keywords:               # 命中任一即喚醒（比對前會正規化）
+    - "hermes"
+    - "赫米斯"
+    - "赫密斯"
+    - "哈米斯"
+
+vad:                      # 需求錄音的能量 VAD
+  speech_rms_threshold: 0.02   # 判定為語音的 RMS 門檻
+  preroll_timeout_sec: 6.0     # 前置靜音等待上限
+  trailing_silence_sec: 1.2    # 講完後連續靜音多久視為結束
+  max_record_sec: 60.0         # 單次錄音最長
+  min_record_sec: 0.5          # 單次錄音最短
+
+confirm:                  # 回述確認
+  record_sec: 3.0
+  max_retries: 3          # 需求重錄上限
+  max_unclear: 2          # 連續無法判定上限
+  agree_words: ["對", "是", "好", "沒錯", "正確", "可以", "ok", "go", "嗯", "yes"]
+  disagree_words: ["不", "錯", "重講", "再說", "重來", "no"]
+
+tts:
+  voice: "zh-TW-HsiaoChenNeural"
+  ok_prompt: "OK，請說出你的需求。"
+  confirm_template: "我理解成：{transcript}。對嗎？"
+  unclear_prompt: "抱歉我沒聽清楚，請再說一次要或不要。"
+  give_up_prompt: "我先放棄，請再說一次。"
+  dispatched_prompt: "好的，已經派工出去了。"
+  beep_freq: 880.0
+  beep_dur_sec: 0.18
+  beep_volume: 0.3
+
+stt:
+  scoped_script: "~/.hermes/scripts/voice_task/stt_scoped.sh"
+  model: ""               # 空 = 用腳本預設模型
+  timeout_sec: 180.0
+  ffmpeg_bin: "ffmpeg"
+
+discord:
+  api_base: "https://discord.com/api/v10"
+  channel_id: "1392008000197365870"    # #人工智障
+  guild_id: "1340241728959025236"
+  auto_archive_duration: 1440          # thread 自動封存（分鐘）
+  thread_name_limit: 100               # Discord thread 名長度上限
+  card_template: "🎙️ \"{transcript}\""
+  thread_name_template: "🎙️ {short}"
+  thread_short_len: 40
+  task_card_template: |-
+    **🎙️ 語音任務**
+    需求原文：
+    > {transcript}
+
+    建立時間：{date}
+  dispatched_notice: "✅ 收到，開始處理。"
+  env_file: "~/.hermes/.env"           # 讀 DISCORD_BOT_TOKEN 的來源
+  token_env: "DISCORD_BOT_TOKEN"
+  timeout_sec: 30.0
+
+dispatch:
+  hermes_bin: "hermes"
+  log_dir: "~/.local/state/hermes-voice-dispatch/dispatch"
+  prompt_template: |-
+    你剛收到一則使用者用「語音」下的需求（語音派工）。需求原文：
+    「{transcript}」
+
+    請把這件事當成一般任務處理，並把過程與結果完整回報到這條 Discord 討論串：
+      channel_id={channel_id}  thread_id={thread_id}
+    回報指令：hermes send --to discord:{channel_id}:{thread_id} "<訊息>"
+
+    步驟：
+    1. 先在串內發一則開工訊息，說明你打算怎麼做。
+    2. 執行過程中把重要進度發到串內（不要沉默太久）。
+    3. 若中途需要使用者確認，就在串內發問並停下來等；使用者會直接在串內回覆你。
+    4. 完成後把結果發到串內，包含你實際做了什麼、怎麼驗證的。若失敗也要回報失敗原因。

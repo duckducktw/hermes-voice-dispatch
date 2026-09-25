@@ -1,0 +1,7 @@
+# 這些依賴已預裝在 Hermes venv：~/.hermes/hermes-agent/venv
+# 這裡僅供文件與（必要時）重建環境參考。請勿新增 torch / openai-whisper / pyaudio 等重依賴。
+numpy>=2.0
+sounddevice>=0.5
+edge-tts>=7.0
+faster-whisper>=1.2
+PyYAML>=6.0

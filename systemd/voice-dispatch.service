@@ -1,0 +1,32 @@
+# hermes-voice-dispatch user service
+#
+# 安裝：
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/voice-dispatch.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now voice-dispatch.service
+# 檢視 log：
+#   journalctl --user -u voice-dispatch.service -f
+#
+# 註 1：Discord token 由程式自行從 ~/.hermes/.env 解析（不需 EnvironmentFile）。
+# 註 2：WorkingDirectory 必須是這個 repo 的根目錄（`python -m voice_dispatch`
+#       要靠它才 import 得到套件）。若你 clone 在別的位置，請改這一行。
+# 註 3：PATH 要含 hermes 執行檔所在目錄，否則派工時 spawn 不到 `hermes`。
+
+[Unit]
+Description=Hermes 語音派工守護程式（拍手兩下 + 喊 Hermes 喚醒）
+After=default.target sound.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Data/Dev/python/hermes-voice-dispatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python3 -m voice_dispatch
+Restart=always
+RestartSec=3
+# 讓拍手偵測有即時性
+Nice=-2
+
+[Install]
+WantedBy=default.target
