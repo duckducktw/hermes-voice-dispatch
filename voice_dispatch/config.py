@@ -92,6 +92,10 @@ class VadConfig:
 
 @dataclass
 class ConfirmConfig:
+    # ⚠️ 2026-09-25 起確認輪不再阻塞（fail-open），以下三個欄位目前**不再生效**，
+    # 只留著避免舊設定檔載入時出錯：agree_words（不再需要說「對」）、
+    # record_sec（不再另外錄一段確認音）、max_unclear（不再有 unknown 迴圈）。
+    # 真正還在用的只有 max_retries（需求重錄上限）。
     record_sec: float = 3.0              # 回述確認時錄音長度
     max_retries: int = 3                 # 需求重錄上限
     max_unclear: int = 2                 # 連續無法判定的上限
@@ -107,8 +111,9 @@ class ConfirmConfig:
 class TtsConfig:
     voice: str = "zh-CN-XiaoyiNeural"
     ok_prompt: str = "OK，請說出你的需求。"
-    confirm_template: str = "我理解成：{transcript}。對嗎？"
-    unclear_prompt: str = "抱歉我沒聽清楚，請再說一次要或不要。"
+    # 2026-09-25 起確認輪不再阻塞（不再等人說「對」），文案改成純告知。
+    confirm_template: str = "我理解成：{transcript}，直接派工。"
+    unclear_prompt: str = "好的，請重新說一次需求。"
     give_up_prompt: str = "我先放棄，請再說一次。"
     dispatched_prompt: str = "好的，已經派工出去了。"
     # beep 提示音（用 numpy 合成正弦波，不需外部音檔）
@@ -121,7 +126,11 @@ class TtsConfig:
 class SttConfig:
     # STT 一律經由此包裝腳本（cgroup 保護，避免 OOM），回傳一行 JSON
     scoped_script: str = "~/.hermes/scripts/voice_task/stt_scoped.sh"
-    model: str = ""                 # 空字串 = 用腳本預設模型
+    model: str = ""                 # 空字串 = 用腳本預設模型（large-v3）
+    # 喚醒詞只用來比對「hermes」，不需要 large-v3。實測單次耗時：
+    # large-v3 7.0s / small 2.6s / base 1.9s（皆有認出 Hermes）。
+    # 喚醒詞是冷啟動路徑，每省 4 秒都很有感，所以單獨用快模型。
+    wake_model: str = "Systran/faster-whisper-small"
     timeout_sec: float = 180.0
     ffmpeg_bin: str = "ffmpeg"      # 前處理：正規化成 16k mono wav
 

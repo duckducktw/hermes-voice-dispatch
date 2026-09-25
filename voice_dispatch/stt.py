@@ -76,15 +76,20 @@ def _parse_transcript(stdout: str) -> str:
     return str(data.get("transcript", "")).strip()
 
 
-def transcribe_wav(wav_path: str, cfg: Config, logger=None) -> str:
-    """呼叫 stt_scoped.sh <wav> - 取得轉錄字串。"""
+def transcribe_wav(wav_path: str, cfg: Config, logger=None, model: str = "") -> str:
+    """呼叫 stt_scoped.sh <wav> - 取得轉錄字串。
+
+    model 傳空字串時用 cfg.stt.model（再空則用腳本預設＝large-v3）；
+    有值則覆寫，讓喚醒詞這種冷啟動路徑可以換成快模型。
+    """
     script = cfg.resolved_scoped_script()
     if not os.path.exists(script):
         raise SttError(f"找不到 STT 腳本：{script}")
 
     argv = [script, wav_path, "-"]
-    if cfg.stt.model:
-        argv.append(cfg.stt.model)
+    chosen = model or cfg.stt.model
+    if chosen:
+        argv.append(chosen)
 
     try:
         proc = subprocess.run(
@@ -115,8 +120,12 @@ def transcribe_samples(
     cfg: Config,
     tmpdir: Optional[str] = None,
     logger=None,
+    model: str = "",
 ) -> str:
-    """把 numpy 樣本寫成 wav 後轉錄。回傳轉錄字串。"""
+    """把 numpy 樣本寫成 wav 後轉錄。回傳轉錄字串。
+
+    model 見 transcribe_wav：空字串＝用 cfg.stt.model / 腳本預設。
+    """
     import tempfile
 
     from . import audio
@@ -128,7 +137,7 @@ def transcribe_samples(
         audio.write_wav(raw_path, samples, cfg.audio.samplerate)
         # 已是 16k mono，但仍過一次 ffmpeg 確保格式一致
         normalize_wav(raw_path, norm_path, cfg, logger=logger)
-        return transcribe_wav(norm_path, cfg, logger=logger)
+        return transcribe_wav(norm_path, cfg, logger=logger, model=model)
     finally:
         for p in (raw_path, norm_path):
             try:

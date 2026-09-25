@@ -1,4 +1,6 @@
-"""主狀態機：idle → wake → record → confirm → forward → dispatch。
+"""主狀態機：idle → wake → record → forward → dispatch。
+
+（2026-09-25 起沒有獨立的 confirm 階段：複述只是告知、不等待回覆。）
 
 - 正式模式：持續監聽麥克風，雙拍手 + 喚醒詞喚醒後走完整流程。
 - --once：只跑一輪。
@@ -22,7 +24,7 @@ import numpy as np
 from . import audio, dispatch, stt, tts, wake
 from .config import Config
 from .discord_api import DiscordClient
-from .text import classify_confirmation, make_thread_name
+from .text import classify_confirmation, make_thread_name, normalize
 from .vad import VadSegmenter, VadState
 
 log = logging.getLogger("voice_dispatch")
@@ -132,8 +134,11 @@ class VoiceDispatcher:
                     log.info("偵測到雙拍手，錄喚醒詞視窗…")
                     samples = self._collect_seconds(stream, self.cfg.wake.window_sec)
                     try:
+                        # 喚醒詞用快模型（small，約 2.6s）而不是 large-v3（7s）：
+                        # 這裡只需要比對「hermes」一個詞，不值得花 7 秒。
                         transcript = stt.transcribe_samples(
-                            samples, self.cfg, logger=log
+                            samples, self.cfg, logger=log,
+                            model=self.cfg.stt.wake_model,
                         )
                     except stt.SttError as exc:
                         log.warning("喚醒詞 STT 失敗：%s", exc)
@@ -314,45 +319,47 @@ class VoiceDispatcher:
             return None
         return transcript.strip() or None
 
-    def confirm(self, stream, transcript: str) -> str:
-        """回述確認一次。回傳 "agree" / "disagree" / "unknown"。"""
-        prompt = self.cfg.tts.confirm_template.format(transcript=transcript)
-        tts.speak(prompt, self.cfg, logger=log)
-        samples = self._collect_seconds(stream, self.cfg.confirm.record_sec)
-        try:
-            answer = stt.transcribe_samples(samples, self.cfg, logger=log)
-        except stt.SttError as exc:
-            log.warning("確認 STT 失敗：%s", exc)
-            return "unknown"
-        log.info("確認回覆轉錄：%r", answer)
-        return classify_confirmation(
-            answer, self.cfg.confirm.agree_words, self.cfg.confirm.disagree_words
+    def _is_retry_only(self, transcript: str) -> bool:
+        """整句就只是否定／要求重說嗎？
+
+        刻意要求「短」：disagree_words 裡有長度 1 的「不」，
+        若只看有沒有命中，「我覺得這不行」也會被當成否定而白重錄一次。
+        """
+        norm = normalize(transcript)
+        if not norm or len(norm) > 5:
+            return False
+        return (
+            classify_confirmation(norm, [], self.cfg.confirm.disagree_words)
+            == "disagree"
         )
 
     def record_and_confirm(self, stream) -> Optional[str]:
-        """R2–R4 完整流程；回傳已確認的需求文字或 None（放棄）。"""
+        """錄需求 → STT → 複述（告知用，不等回覆）→ 交付。
+
+        2026-09-25 改版：拿掉「必須說『對』才算數」的確認輪。
+        舊版固定錄 3 秒等使用者說「對」，但「對」只有約 0.3 秒，VAD 幾乎把
+        它全砍掉 → Whisper 回吐幻覺（實測連續得到「然後想說,造孽啊。」
+        「作為成功我肯定會破防。」）→ 使用者卡在鬼打牆、一次互動要一分鐘。
+
+        改成 fail-open：只有整句就是否定詞（不／錯／重來／再說）才重錄，
+        其他一律直接派工；複述只是讓使用者知道聽到什麼，不等待回覆。
+        """
         retries = 0
         while retries <= self.cfg.confirm.max_retries and not self._stop:
             transcript = self.prompt_and_capture(stream)
             if not transcript:
                 retries += 1
                 continue
-
-            unclear = 0
-            while not self._stop:
-                verdict = self.confirm(stream, transcript)
-                if verdict == "agree":
-                    return transcript
-                if verdict == "disagree":
-                    log.info("使用者不同意，重新錄需求。")
-                    break  # 回到外層重錄
-                # unknown
-                unclear += 1
-                if unclear >= self.cfg.confirm.max_unclear:
-                    tts.speak(self.cfg.tts.give_up_prompt, self.cfg, logger=log)
-                    return None
+            if self._is_retry_only(transcript):
+                log.info("需求只有否定／重來詞（%r）→ 重錄。", transcript)
                 tts.speak(self.cfg.tts.unclear_prompt, self.cfg, logger=log)
-            retries += 1
+                retries += 1
+                continue
+            tts.speak(
+                self.cfg.tts.confirm_template.format(transcript=transcript),
+                self.cfg, logger=log,
+            )
+            return transcript
         log.info("超過重試上限，放棄本輪。")
         return None
 
