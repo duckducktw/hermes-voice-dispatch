@@ -637,7 +637,7 @@ class VoiceDispatcher:
                 log.warning("心跳發送失敗：%s", exc)
 
         def _watch_thread_for_result():
-            """webhook 模式專用：agent 在 gateway 內跑，我們沒有 stdout 可以讀，所以改成
+            """relay 模式專用：agent 由 gateway 接手跑，我們沒有 stdout 可以讀，所以改成
             **盯討論串**——等串內安靜下來（連續 `quiet` 秒沒有新訊息）就取最後一則當結果
             用「講的」回報，藉此保住原本的語音回報功能。硬上限 25 分鐘。
 
@@ -648,40 +648,57 @@ class VoiceDispatcher:
             quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 60.0) or 60.0)
             deadline = time.time() + 25 * 60
 
+            def _is_notice(text: str) -> bool:
+                """串內「非 agent 回覆」的訊息（我們的公告／心跳／relay 原文）——不該被當結果唸。"""
+                t = text.strip()
+                return (
+                    not t
+                    or "<@" in t                      # relay 進去的需求原文
+                    or t.startswith("🎙️")
+                    or t.startswith("✅ 收到")
+                    or t.startswith("⏳")
+                    or t.startswith("⚠️")
+                    or "仍在處理中" in t
+                )
+
             def _loop():
                 c = DiscordClient(self.cfg, logger=log)
                 last_seen = ""
                 last_change = time.time()
                 spoken = ""
+                bot_id = str(getattr(self.cfg.relay, "mention_id", ""))
                 while time.time() < deadline and not self._stop:
                     try:
                         msgs = _as_list(c.get_messages(thread_id, 20))
                     except Exception:  # noqa: BLE001
                         time.sleep(10)
                         continue
+                    # 變動偵測看「全部訊息」（含公告／relay），任一動靜就重置安靜計時。
                     newest = max((str(m.get("id", "")) for m in msgs), default="")
                     if newest and newest != last_seen:
                         last_seen = newest
                         last_change = time.time()
                     elif last_seen and (time.time() - last_change) >= quiet_needed:
-                        # 安靜下來：把最後一則（且非心跳/公告）當結果講出來
+                        # 安靜下來：取「agent 自己（gateway bot）發的、非公告」的最後一則當結果。
                         text = ""
                         for m in msgs:
-                            if str(m.get("id", "")) == last_seen:
-                                text = str(m.get("content", ""))
-                                break
+                            author_id = str((m.get("author") or {}).get("id", ""))
+                            content = str(m.get("content", ""))
+                            if bot_id and author_id != bot_id:
+                                continue
+                            if _is_notice(content):
+                                continue
+                            text = content
+                            break
                         text = text.strip()
-                        if (text and text != spoken
-                                and "仍在處理中" not in text
-                                and not text.startswith("🎙️")
-                                and not text.startswith("⚠️ 派工失敗")):
+                        if text and text != spoken:
                             try:
                                 summary = spoken_summary(
                                     text,
                                     int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160),
                                 )
                                 if summary:
-                                    log.info("語音回報結果（webhook 模式，讀串）：%s", summary[:80])
+                                    log.info("語音回報結果（relay 模式，讀串）：%s", summary[:80])
                                     tts.speak(summary, self.cfg, logger=log)
                                     spoken = text
                             except Exception as exc:  # noqa: BLE001
@@ -691,24 +708,25 @@ class VoiceDispatcher:
 
             _th.Thread(target=_loop, daemon=True).start()
 
-        # ── 派工：預設走 gateway webhook（agent 在 gateway 內跑 → 逐字串流進討論串）；──
-        #    沒有 webhook secret 或 POST 失敗 → 回退舊的 spawn `hermes -z`。
-        wh = getattr(self.cfg, "webhook", None)
-        use_webhook = bool(
-            wh and getattr(wh, "enabled", False) and getattr(wh, "secret", "")
+        # ── 派工：把需求當成「一則 @Hermes 的訊息」發進討論串 → gateway 用它原本那條路──
+        #    （同一條 session、typing、逐字串流、後續追問接續＝跟打字完全一樣）
+        #    relay URL 缺失或送出失敗 → 回退舊的 spawn `hermes -z`。
+        relay = getattr(self.cfg, "relay", None)
+        use_relay = bool(
+            relay and getattr(relay, "enabled", False) and getattr(self.cfg, "relay_url", "")
         )
-        if use_webhook:
+        if use_relay:
             try:
-                dispatch.post_webhook(prompt, channel_id, thread_id, self.cfg, logger=log)
+                dispatch.post_relay(transcript, thread_id, self.cfg, logger=log)
                 _watch_thread_for_result()
             except Exception as exc:  # noqa: BLE001
-                log.error("webhook 派工失敗：%s → 回退 spawn hermes", exc)
-                use_webhook = False
+                log.error("relay 送出失敗：%s → 回退 spawn hermes", exc)
+                use_relay = False
             else:
                 client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
                 if self.cfg.tts.prompt_mode != "chime":
                     tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
-                log.info("webhook 派工完成，thread=%s", thread_id)
+                log.info("relay 派工完成（gateway 接手），thread=%s", thread_id)
                 return
 
         try:
@@ -746,9 +764,11 @@ class VoiceDispatcher:
             "[討論串任務卡]",
             task_card,
             "[派工方式]",
-            (f"  webhook → {self.cfg.webhook.url}（agent 在 gateway 內跑，逐字串流進討論串）"
-             if getattr(self.cfg.webhook, "enabled", False) and self.cfg.webhook.secret
-             else f"  spawn：{argv[0]} {argv[1]} <dispatch_prompt>（無 webhook 設定）"),
+            (f"  relay → 在討論串發「<@{self.cfg.relay.mention_id}> 需求原文」"
+             "（gateway 當一般訊息處理＝跟打字一樣；webhook URL 讀 .env，"
+             "dry-run 不載入 secrets）"
+             if getattr(self.cfg.relay, "enabled", False)
+             else f"  spawn（relay 停用）：{argv[0]} {argv[1]} <dispatch_prompt>"),
             "[dispatch_prompt 內容]",
             prompt,
             "==========================================================",

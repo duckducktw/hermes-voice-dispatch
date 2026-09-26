@@ -365,21 +365,30 @@ class DispatchConfig:
 
 
 @dataclass
-class WebhookConfig:
-    """派工改走 gateway 的 Hermes webhook：讓 agent 在 **gateway 內**跑，回覆由 gateway 的
-    streaming（逐字編輯同一則訊息）即時貼進 Discord 討論串＝跟打字一樣看到它在動。
+class RelayConfig:
+    """把語音需求「當成一則使用者訊息」送進 Discord 討論串 → gateway 用它原本那條路處理。
 
-    為什麼（2026-09-26 使用者：「webhook 那個及時真實打字幹活沒有實作」）：
-    `hermes -z` 是一次性 CLI，只把最終輸出印到 stdout、**不經過 gateway**，所以整段工作
-    期間討論串是安靜的（只有 agent 自己記得發的訊息）。改 POST 本機 webhook →
-    gateway 跑 agent → 逐字串流進串。前置條件（在 ~/.hermes/config.yaml）：
-    `streaming.enabled: true` 且 `platforms.webhook` 已啟用並有 `voice-task` route。
+    為什麼改成這樣（2026-09-26 使用者定案）：
+      「要從 gateway 處理語音出來的任務。像是我打字→開串→gateway 處理，只是把打字變成語音。」
+    gateway 只處理使用者訊息、會忽略機器人訊息；但 Hermes 的 Discord adapter 原生支援
+    **接受受信任 bot 的訊息**（`DISCORD_ALLOW_BOTS=mentions`：只接受 @提及 Hermes 的
+    bot 訊息，官方文件明講這是給 relay／webhook bot 用的）。所以：
+      daemon 用一個 **Discord webhook**（author 是 webhook 自己、`bot=true`、id≠gateway bot）
+      把「<@gateway_bot> 需求原文」發進討論串 → gateway 視為一般訊息 → 同一條 session、
+      同樣的 typing/逐字串流/後續追問接續＝跟打字完全一樣。
+
+    與舊做法的差別：不必自己 spawn `hermes -z`、也不必自組 dispatch prompt；agent 就是
+    這條討論串的 agent。前提：gateway 的 `.env` 要有 `DISCORD_ALLOW_BOTS=mentions`，
+    且 `streaming.enabled=true`（逐字）。
     """
     enabled: bool = True
-    # gateway 監聽的本機 webhook；route 名 = voice-task。
-    url: str = "http://127.0.0.1:8644/webhooks/voice-task"
-    # HMAC 密鑰（route secret）。空字串＝不啟用，回退舊的 spawn `hermes -z`。
-    secret: str = ""
+    env_file: str = "~/.hermes/.env"
+    # 完整 webhook URL（含 token）。空＝停用，回退舊的 spawn `hermes -z`。
+    url_env: str = "DISCORD_RELAY_WEBHOOK_URL"
+    # gateway bot 的 user id：訊息內容要 @ 它，gateway 才會收（ALLOW_BOTS=mentions）。
+    mention_id: str = "1520796555580543138"
+    # webhook 發話時顯示的名稱（讓串內看得出這是語音進來的）。
+    username: str = "🎙️ 語音輸入"
     timeout_sec: float = 20.0
 
 
@@ -394,12 +403,13 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     dispatch: DispatchConfig = field(default_factory=DispatchConfig)
-    webhook: WebhookConfig = field(default_factory=WebhookConfig)
+    relay: RelayConfig = field(default_factory=RelayConfig)
     # 主 log 檔（daemon 生命週期用）
     log_file: str = "~/.local/state/hermes-voice-dispatch/dispatch.log"
 
     # 執行期填入，不從 YAML 讀
     discord_token: Optional[str] = None
+    relay_url: Optional[str] = None
 
     # ------------------------------------------------------------------
     def resolved_scoped_script(self) -> str:
@@ -452,6 +462,10 @@ def load_config(path: Optional[str] = None, *, load_token: bool = True) -> Confi
     if load_token:
         cfg.discord_token = read_env_value(
             expand(cfg.discord.env_file), cfg.discord.token_env
+        )
+        # relay webhook（含 token）也放 .env；空字串＝relay 停用，回退 spawn。
+        cfg.relay_url = read_env_value(
+            expand(cfg.relay.env_file), cfg.relay.url_env
         )
 
     return cfg

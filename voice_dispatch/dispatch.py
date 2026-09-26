@@ -118,59 +118,55 @@ def extract_stdout(log_file: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Webhook 派工（agent 在 gateway 內跑 → gateway streaming 逐字貼進討論串）
+# Relay 派工：把語音需求當成「一則 @Hermes 的使用者訊息」丟進討論串
 # ---------------------------------------------------------------------------
-def _sign_v2(secret: str, timestamp: str, body: bytes) -> str:
-    """gateway webhook 的通用 V2 簽章：hex HMAC-SHA256("<timestamp>.<body>")。"""
-    import hashlib
-    import hmac
+def build_relay_content(transcript: str, cfg: Config) -> str:
+    """組出 relay 訊息內容：`<@gateway_bot> 需求原文`。
 
-    return hmac.new(
-        secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256
-    ).hexdigest()
+    一定要 @ gateway bot——gateway 的 `DISCORD_ALLOW_BOTS=mentions` 只接受
+    「@提及 Hermes 的 bot 訊息」（Hermes 官方給 relay/webhook bot 的入口）。
+    """
+    return f"<@{cfg.relay.mention_id}> {transcript}"
 
 
-def post_webhook(
-    prompt: str, channel_id: str, thread_id: str, cfg: Config, logger=None
-) -> dict:
-    """POST 需求到本機 gateway webhook，觸發 gateway 內的 agent run。
+def post_relay(transcript: str, thread_id: str, cfg: Config, logger=None) -> dict:
+    """用 Discord webhook 把需求發進討論串，讓 gateway 當一般訊息處理。
 
-    成功＝gateway 回 202（非阻塞：它自己背景跑 agent），回傳回應 JSON。
-    失敗會 raise，讓呼叫端可以回退到 spawn `hermes -z`。
+    成功回傳 Discord 的訊息 JSON（wait=true）。失敗會 raise，讓呼叫端回退 spawn。
     """
     import json
-    import time as _time
     import urllib.error
     import urllib.request
 
-    wh = cfg.webhook
-    if not wh.secret:
-        raise RuntimeError("cfg.webhook.secret 為空，無法簽章（改用 spawn 路徑）")
+    url = cfg.relay_url or ""
+    if not url:
+        raise RuntimeError("relay url 為空（.env 沒有 DISCORD_RELAY_WEBHOOK_URL）")
 
-    payload = {"prompt": prompt, "channel_id": str(channel_id),
-               "thread_id": str(thread_id)}
+    sep = "&" if "?" in url else "?"
+    target = f"{url}{sep}thread_id={thread_id}&wait=true"
+    payload = {"content": build_relay_content(transcript, cfg),
+               "username": cfg.relay.username}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    ts = str(int(_time.time()))
     req = urllib.request.Request(
-        wh.url,
-        data=body,
-        method="POST",
+        target, data=body, method="POST",
         headers={
             "Content-Type": "application/json",
-            "X-Webhook-Timestamp": ts,
-            "X-Webhook-Signature-V2": _sign_v2(wh.secret, ts, body),
+            # 必須自帶 User-Agent：Discord 前面的 Cloudflare 會擋 urllib 預設 UA
+            # （實測回應 403 body「error code: 1010」）。既有 DiscordClient 同樣做法。
+            "User-Agent": "hermes-voice-dispatch (https://example.invalid, 0.1.0)",
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=float(wh.timeout_sec)) as resp:
+        with urllib.request.urlopen(req, timeout=float(cfg.relay.timeout_sec)) as resp:
             raw = resp.read().decode("utf-8", "replace")
             data = json.loads(raw) if raw else {}
             if logger:
-                logger.info("webhook 派工已受理（HTTP %s）：%s", resp.status, data)
+                logger.info("relay 訊息已送出（HTTP %s，msg=%s）",
+                            resp.status, data.get("id"))
             return data
-    except urllib.error.HTTPError as exc:  # noqa: PERF203
+    except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"webhook HTTP {exc.code}：{detail}") from exc
+        raise RuntimeError(f"relay HTTP {exc.code}：{detail}") from exc
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"webhook POST 失敗：{exc}") from exc
+        raise RuntimeError(f"relay 送出失敗：{exc}") from exc
 
