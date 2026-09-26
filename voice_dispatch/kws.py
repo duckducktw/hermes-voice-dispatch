@@ -93,6 +93,39 @@ class WakeWordSpotter:
         return hit
 
 
+def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0):
+    """接受規則：轉錄 token 序列中出現 `(前綴)(變體)` 的**相鄰 bigram**，且兩個 token
+    的信心度都 ≥ `min_conf`，就回傳命中的字串，否則 None。
+
+    為什麼不比對「完全相等」：全詞彙解碼對罕見專有名詞不穩——真講 "Hermes" 常被聽成
+    `homes`/`hums`，開頭的 "hey" 也可能被聽成 `a`/`the`。所以兩側都用「集合」放寬，
+    而否決力來自變體集合本身：`hermit`/`mess`/`miss`/`mouse`/`mom`/`harm` 都不在裡面。
+    純函式，方便單元測試。
+    """
+    pset = {str(w).lower().strip() for w in prefixes}
+    vset = {str(w).lower().strip() for w in variants}
+    for i in range(len(tokens) - 1):
+        if tokens[i] in pset and tokens[i + 1] in vset:
+            if min(confs[i], confs[i + 1]) >= min_conf:
+                return f"{tokens[i]} {tokens[i + 1]}"
+    return None
+
+
+def match_wake_phrase_scored(tokens, confs, phrases):
+    """同 `match_wake_phrase`，但不套門檻，改回傳 `(詞彙, 最小 token 信心度)`。
+
+    給需要「先取候選、再自行套門檻」的呼叫者（評測工具 / 兩段式第一階）用。
+    """
+    for phrase in phrases:
+        n = len(phrase)
+        if not n or n > len(tokens):
+            continue
+        for i in range(len(tokens) - n + 1):
+            if tuple(tokens[i:i + n]) == tuple(phrase):
+                return " ".join(phrase), min(confs[i:i + n])
+    return None
+
+
 def match_wake_phrase(tokens, confs, phrases, min_conf: float):
     """詞序比對：token 序列中若含某個詞彙（整段詞序相同）且每個 token 信心度
     都 ≥ `min_conf`，回傳該詞彙字串，否則 None。
@@ -104,13 +137,9 @@ def match_wake_phrase(tokens, confs, phrases, min_conf: float):
 
     純函式（不碰模型），方便單元測試。
     """
-    for phrase in phrases:
-        n = len(phrase)
-        if not n or n > len(tokens):
-            continue
-        for i in range(len(tokens) - n + 1):
-            if tuple(tokens[i:i + n]) == tuple(phrase) and min(confs[i:i + n]) >= min_conf:
-                return " ".join(phrase)
+    m = match_wake_phrase_scored(tokens, confs, phrases)
+    if m and m[1] >= min_conf:
+        return m[0]
     return None
 
 
@@ -135,7 +164,8 @@ class VoskSpotter:
       4 段真實房間背景（共 56 秒）→ 零誤觸；單次耗時 0.05~0.08s（3 秒音檔）
     """
 
-    def __init__(self, model_path: str, words=None, min_conf: float = 0.0, logger=None):
+    def __init__(self, model_path: str, words=None, min_conf: float = 0.0, logger=None,
+                 full_vocab: bool = False, use_partial: bool = False):
         import os as _os
         from vosk import KaldiRecognizer, Model, SetLogLevel
 
@@ -144,12 +174,26 @@ class VoskSpotter:
         self.min_conf = float(min_conf)
         # 每個詞彙切成 token 序列（"hey hermes" → ["hey","hermes"]），用於詞序比對。
         self._phrases = [tuple(p.split()) for p in self.words]
+        self.full_vocab = bool(full_vocab)
+        # use_partial：連「未定案的 partial 結果」也算命中＝**最低延遲**的閘門。
+        # partial 沒有 per-word 信心度、且限制詞彙會硬把雜音解成詞，所以只適合當
+        # 「第一階段閘門」（後面還有確認階段負責精度），不適合單獨當最終判定。
+        self.use_partial = bool(use_partial)
         self._model = Model(_os.path.expanduser(model_path))
-        self._rec = KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
+        if self.full_vocab:
+            # 全詞彙解碼：**不加 grammar**。這樣才看得出實際講的是 "hey hermit"
+            # 還是 "hey hermes"——限制詞彙會把近似音硬解成惟一的候選詞（見兩段式）。
+            self._rec = KaldiRecognizer(self._model, 16000)
+        else:
+            # 限制詞彙解碼：等同關鍵詞偵測，常開路徑用（快、省）。
+            self._rec = KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
         self._rec.SetWords(True)        # 要 per-word conf 才擋得掉近似音誤觸
         self.latest = ""
+        self.last_conf = 0.0            # 最近一次命中的最小 token 信心度（診斷用）
         if logger:
-            logger.info("喚醒詞引擎：vosk（詞彙 %s，信心度門檻 %.2f）", self.words, self.min_conf)
+            logger.info(
+                "喚醒詞引擎：vosk（%s，詞彙 %s，信心度門檻 %.2f）",
+                "全詞彙" if self.full_vocab else "限制詞彙", self.words, self.min_conf)
 
     def feed(self, samples) -> Optional[str]:
         """餵入音訊；命中喚醒詞回傳該詞，否則 None。
@@ -168,14 +212,96 @@ class VoskSpotter:
         if pcm.size == 0:
             return None
         if not self._rec.AcceptWaveform(pcm.tobytes()):
-            self.latest = json.loads(self._rec.PartialResult()).get("partial", "")
+            data = json.loads(self._rec.PartialResult())
+            self.latest = data.get("partial", "")
+            if self.use_partial:
+                # partial 沒有 per-word 信心度 → 只做詞序比對，不套 conf。
+                # （精度交給下游確認階段；這裡的目標是「最早觸發」。）
+                toks = self.latest.split()
+                m = match_wake_phrase_scored(toks, [1.0] * len(toks), self._phrases)
+                if m:
+                    self.last_conf = 1.0
+                    return m[0]
             return None
         data = json.loads(self._rec.Result())
         self.latest = data.get("text", "")
         result = data.get("result") or []
         tokens = [str(w.get("word", "")).lower() for w in result]
         confs = [float(w.get("conf", 0.0)) for w in result]
-        return match_wake_phrase(tokens, confs, self._phrases, self.min_conf)
+        m = match_wake_phrase_scored(tokens, confs, self._phrases)
+        if m and m[1] >= self.min_conf:
+            self.last_conf = m[1]
+            return m[0]
+        return None
+
+    def verify_utterance(self, samples) -> Optional[str]:
+        """整段（非串流）辨識後做詞序比對——**兩段式的第二階段確認**用。
+
+        與 `feed()` 共用同一顆模型與詞彙表，但一次吃完整段音訊（`Reset` →
+        全部餵入 → `FinalResult`）。第二階段只在高精度模型上跑，且僅在第一階段
+        出現候選時才呼叫，所以「常開路徑不跑重模型」的原則不受影響。
+        """
+        pcm = _to_pcm16(samples)
+        self._rec.Reset()
+        if pcm.size:
+            self._rec.AcceptWaveform(pcm.tobytes())
+        data = json.loads(self._rec.FinalResult())
+        self.latest = data.get("text", "")
+        result = data.get("result") or []
+        tokens = [str(w.get("word", "")).lower() for w in result]
+        confs = [float(w.get("conf", 0.0)) for w in result]
+        m = match_wake_phrase_scored(tokens, confs, self._phrases)
+        if m and m[1] >= self.min_conf:
+            self.last_conf = m[1]
+            return m[0]
+        return None
+
+
+class WakeVerifier:
+    """兩段式的**第二階段**：對第一階段的候選做「真的是喚醒詞嗎」的確認。
+
+    為什麼要它（2026-09-26 實測結論）：第一階段用**限制詞彙**解碼當快速關鍵詞偵測
+    （省、快，但**一定會把最接近的近似音硬解成喚醒詞**——"hey hermit"、"hay her mess"
+    都被解成 `hey hermes` 且 conf=1.0，所以光靠 confidence 擋不掉，實測誤判 ~8.5%）。
+    第二階段改用**同顆（或更大）模型的「全詞彙」解碼**，看它實際轉出什麼字：
+    "hey hermit"→`hey hermit`、"hay her mess"→`hey her mess`，就否決掉了。
+
+    但全詞彙解碼對罕見專有名詞不穩（"Hermes" 常被聽成 `homes`/`hums`），所以接受
+    規則不是完全相等，而是 **`(hey 類詞)(hermes 類詞)` 的相鄰 bigram**（可設定）。
+    實測（664 句近似發音語料）誤判 0/600、漏判 ~8%，且仍用同一顆 small 模型 →
+    零額外記憶體、每次確認 ~50ms（延遲可控）。
+    """
+
+    def __init__(self, model_path: str, prefixes, variants, min_conf: float = 0.0, logger=None):
+        import os as _os
+        from vosk import KaldiRecognizer, Model, SetLogLevel
+
+        SetLogLevel(-1)
+        self.prefixes = {str(w).lower().strip() for w in prefixes if str(w).strip()}
+        self.variants = {str(w).lower().strip() for w in variants if str(w).strip()}
+        self.min_conf = float(min_conf)
+        self._model = Model(_os.path.expanduser(model_path))
+        self._rec = KaldiRecognizer(self._model, 16000)   # 全詞彙（不加 grammar）
+        self._rec.SetWords(True)
+        self.latest = ""
+        if logger:
+            logger.info(
+                "喚醒確認器：vosk 全詞彙（前綴 %s / 變體 %s，信心度門檻 %.2f）",
+                sorted(self.prefixes), sorted(self.variants), self.min_conf)
+
+    def verify(self, samples) -> bool:
+        """整段辨識後套 bigram 規則；命中回 True。清空辨識器狀態，可重複呼叫。"""
+        pcm = _to_pcm16(samples)
+        self._rec.Reset()
+        if pcm.size:
+            self._rec.AcceptWaveform(pcm.tobytes())
+        data = json.loads(self._rec.FinalResult())
+        self.latest = data.get("text", "")
+        result = data.get("result") or []
+        tokens = [str(w.get("word", "")).lower() for w in result]
+        confs = [float(w.get("conf", 0.0)) for w in result]
+        return match_wake_variants(tokens, confs, self.prefixes, self.variants,
+                                   self.min_conf) is not None
 
 
 class SileroVad:

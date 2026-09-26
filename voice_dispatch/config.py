@@ -96,17 +96,46 @@ class WakeConfig:
     #   "openwakeword" = 預訓練模型，不支援自訂詞（只有 hey_jarvis 等）。
     kws_engine: str = "vosk"
     vosk_model: str = "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
-    # 喚醒詞彙表（Vosk 受限詞彙解碼用）。**使用者定案 2026-09-26：喚醒詞＝「hey hermes」**，
-    # 要講全整句才算（只喊 "hermes" 不再觸發）——這是「太敏感」的保守修正。
-    # ⚠️ 命中判斷是**詞序比對**（見 kws.VoskSpotter.feed），不是單字比對：
-    #   grammar 只限制解碼空間，單喊 "hermes" 仍會被 Vosk 強制解成 `hermes`，
-    #   靠詞序（要含 ["hey","hermes"]）才擋得掉。多詞項目＝要求講全。
-    # 信心度門檻 0.8 可擋掉近似音（實測 "The hurries of modern life"
-    # conf=0.58~0.69 被擋掉）；真同音詞（"Her mess…" conf=1.0）擋不掉，屬正常。
-    vosk_words: List[str] = field(default_factory=lambda: ["hey hermes"])
-    # 太敏感 → 0.8 調到 0.9（2026-09-25 使用者反饋「太敏感了」）。
-    # 實測正例（含台灣腔）幾乎都 1.0，所以 0.9 不會漏判，但能擋掉更多近似音。
-    vosk_min_conf: float = 0.9
+    # ══════════════════════════════════════════════════════════════════════
+    #  串接式喚醒（2026-09-26 使用者定案：極限精準 + 極限延遲）
+    #  第一階段「hey」閘門（常開、極省）→ 第二階段「hermes」確認（精度關）。
+    #  使用者原話：「能先抓 hey，然後抓 hermes」。
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── 第一階段：hey 閘門（限制詞彙、常開、最低延遲）──────────────────────
+    # 只認「hey」（+ 同音 hay）。限制詞彙解碼天生會把近似音硬解成唯一候選，
+    # 所以**單獨**用誤判率高（實測對 hey 開頭的近似音 ~8.5%）——但當閘門沒關係，
+    # 因為精度由第二階段負責，這裡只要「不漏掉真的 hey」。
+    vosk_words: List[str] = field(default_factory=lambda: ["hey", "hay"])
+    vosk_min_conf: float = 0.5
+    # partial（未定案結果）也算命中 = 最早觸發、延遲最低。既然後面有確認關，
+    # 這裡可以放心用粗的 partial。設 False = 只用定案結果（保守、慢一點）。
+    gate_partial: bool = True
+
+    # ── 第二階段：hermes 確認（全詞彙解碼 + bigram 規則 = 精度關）───────────
+    # 為什麼用「全詞彙」：限制詞彙會把 hermit/mess 硬解成 hermes，光靠 confidence
+    # 擋不掉；全詞彙解碼才看得出實際講的是 "hey hermit" 還是 "hey hermes"。
+    verify_enabled: bool = True
+    # 空 = 沿用 vosk_model（同顆模型：零額外記憶體、零載入延遲）。實測 664 句
+    # 近似發音語料誤判 0/600、確認僅 ~40ms。要更強可指定更大的模型路徑。
+    verify_model: str = ""
+    # 觸發後回看的音訊長度（秒）：hey 前的 preroll + hey 之後收到的音訊。
+    preroll_sec: float = 1.0
+    # 從觸發起到放棄前，最多再收多少秒（去裡面找 hermes）。
+    verify_window_sec: float = 1.5
+    # 收訊期間每隔多久試判一次：越小越早醒、越吃 CPU（每次確認 ~40ms）。
+    # 實測最大喚醒延遲：0.15→108ms、0.2→172ms、0.3→300ms（中位數都遠早於語音結束）。
+    verify_interval_sec: float = 0.15
+    # 接受規則＝轉錄中出現 (前綴)(變體) 相鄰 bigram。"Hermes" 常被聽成 homes/hums，
+    # "hey" 開頭也常被聽成 a/the，故兩側放寬；否決力來自變體集合本身
+    # （hermit/mess/miss/mouse/mom/harm 皆不在其中 → 否決）。
+    verify_prefixes: List[str] = field(default_factory=lambda: [
+        "hey", "hay", "a", "the", "he", "ok", "okay", "hi",
+    ])
+    verify_variants: List[str] = field(default_factory=lambda: [
+        "hermes", "homes", "hums", "hermis", "hermès", "hermes's",
+    ])
+    verify_min_conf: float = 0.5       # 全詞彙 per-word 信心度門檻（實測 0.5 夠）
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0

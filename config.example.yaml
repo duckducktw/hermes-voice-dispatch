@@ -41,17 +41,29 @@ clap:                     # 雙拍手偵測（校正方式見 README）
   refractory_sec: 0.08    # 一次瞬變後的不反應期
 
 wake:
-  cooldown_sec: 10.0      # 喚醒詞沒過之後的冷卻秒數（避免誤觸時反覆載入 STT 模型）
   mode: "kws"             # "kws"＝關鍵詞偵測（預設）；"clap"＝舊的拍手路徑（退路）
   kws_engine: "vosk"      # "vosk"（支援任意英文詞，現行預設）/"openwakeword"
+  # ══ 串接式喚醒（2026-09-26 使用者定案：極限精準 + 極限延遲）══════════════
+  #  第一階段「hey」閘門（常開、極省、可 partial 即時觸發）
+  #  → 第二階段「hermes」確認（全詞彙解碼 + bigram = 精度關）。
+  #  使用者原話：「能先抓 hey，然後抓 hermes」。
   vosk_model: "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
-  # 喚醒詞彙表。命中判斷是**詞序比對**：多詞項目＝要求整句講全。
-  # 2026-09-26 使用者定案：喚醒詞＝「hey hermes」（只喊 hermes 不再觸發）。
-  vosk_words:
-    - "hey hermes"
-  vosk_min_conf: 0.9      # per-word 信心度門檻（0.8→0.9＝「太敏感」的修正）
+  vosk_words:             # 第一階段閘門詞彙（只認 hey；hay 是同音）
+    - "hey"
+    - "hay"
+  vosk_min_conf: 0.5      # 閘門 per-word 信心度門檻
+  gate_partial: true      # 未定案的 partial 也算 → 最早觸發（關掉會漏判↑、延遲↑）
+  verify_enabled: true    # 第二階段確認（關掉＝只靠閘門，誤判率會回到 ~8.5%）
+  verify_model: ""        # 空＝沿用 vosk_model（同顆模型＝零額外記憶體/載入延遲）
+  preroll_sec: 1.0        # 觸發時回看的音訊（確保窗內含完整「hey」）
+  verify_window_sec: 1.5  # 觸發後最多再收多少秒去找 hermes
+  verify_interval_sec: 0.15  # 收訊期間試判間隔（越小越早醒、越吃 CPU）
+  verify_prefixes: [hey, hay, a, the, he, ok, okay, hi]
+  verify_variants: [hermes, homes, hums, hermis, hermes's]
+  verify_min_conf: 0.5    # 全詞彙 per-word 信心度門檻
   # ── mode="clap"（舊路徑）才用 ──────────────────────────────
   window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
+  cooldown_sec: 10.0      # 喚醒詞沒過之後的冷卻秒數
   keywords:               # 命中任一即喚醒（比對前會正規化）
     - "hermes"
     - "赫米斯"

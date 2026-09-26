@@ -66,3 +66,28 @@ def test_phrase_match_respects_confidence():
 def test_phrase_match_reversed_order_no_hit():
     """詞序顛倒（hermes hey）不算命中。"""
     assert kws.match_wake_phrase(["hermes", "hey"], [1.0, 1.0], _HH, 0.9) is None
+
+
+# ── 第二階段接受規則（WakeVerifier 用）：(前綴)(hermes變體) bigram ────────────
+_PRE = ["hey", "hay", "a", "the", "he", "ok", "okay", "hi"]
+_VAR = ["hermes", "homes", "hums", "hermis"]
+
+
+def test_variants_accepts_true_wake():
+    assert kws.match_wake_variants(["hey", "hermes"], [1.0, 1.0], _PRE, _VAR, 0.5) == "hey hermes"
+    # "Hermes" 常被聽成 homes；"hey" 常被聽成 a/the — 都要接受
+    assert kws.match_wake_variants(["hey", "homes"], [1.0, 1.0], _PRE, _VAR, 0.5) == "hey homes"
+    assert kws.match_wake_variants(["a", "hermes"], [1.0, 1.0], _PRE, _VAR, 0.5) == "a hermes"
+
+
+def test_variants_rejects_confusables():
+    """近似音（hermit/her mess/'her mouse'）要被否決——否決力來自變體集合。"""
+    assert kws.match_wake_variants(["hey", "hermit"], [1.0, 1.0], _PRE, _VAR, 0.5) is None
+    assert kws.match_wake_variants(["hey", "her", "miss"], [1.0, 1.0, 1.0], _PRE, _VAR, 0.5) is None
+    assert kws.match_wake_variants(["hey", "harm", "us"], [1.0, 1.0, 1.0], _PRE, _VAR, 0.5) is None
+    # 只有 hermes 沒有前綴（單喊 hermes）不算命中
+    assert kws.match_wake_variants(["hermes"], [1.0], _PRE, _VAR, 0.5) is None
+
+
+def test_variants_respects_confidence():
+    assert kws.match_wake_variants(["hey", "hermes"], [0.4, 1.0], _PRE, _VAR, 0.5) is None
