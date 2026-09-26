@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import threading
+import time
 import wave
 from contextlib import contextmanager
 from typing import Iterator, List, Optional
@@ -277,8 +279,56 @@ def read_wav(path: str) -> tuple[np.ndarray, int]:
 # --------------------------------------------------------------------------
 # 播放
 # --------------------------------------------------------------------------
+# 「我們自己在出聲」的事實來源（半雙工用）。
+#
+# 為什麼需要：語音回報的 TTS 是**背景 thread** 在播的（daemon.py 的
+# `_watch_thread_for_result`），而主迴圈的 `wait_for_wake()` 同時已經回到
+# 麥克風上聽 → 它會**邊播邊聽**，把自己的聲音收進喚醒偵測 → 誤喚醒 →
+# 又播一次提示音 → 連響（2026-09-26 使用者：「說完後幾分鐘會好幾聲」）。
+# 這裡只提供「現在有沒有在播」「上次播完到現在幾秒」兩個事實，
+# 判斷要不要靜音由 daemon 決定（見 `daemon._echo_muted`）。
+# 掛在 `play_file` 這一個出口，chime／beep／TTS 三條路都涵蓋。
+_OUTPUT_LOCK = threading.Lock()
+_OUTPUT_ACTIVE = 0
+_OUTPUT_ENDED_AT = 0.0  # time.monotonic()；0.0＝這支程式還沒播過任何東西
+
+
+def output_busy() -> bool:
+    """現在是否正在播放音效／語音（含背景 thread 播的）。"""
+    with _OUTPUT_LOCK:
+        return _OUTPUT_ACTIVE > 0
+
+
+def output_quiet_sec() -> float:
+    """上次播放結束距今幾秒。從沒播過回 `inf`（＝永遠「安靜很久了」）。"""
+    with _OUTPUT_LOCK:
+        if _OUTPUT_ENDED_AT <= 0.0:
+            return float("inf")
+        return max(0.0, time.monotonic() - _OUTPUT_ENDED_AT)
+
+
+@contextmanager
+def _output_active() -> Iterator[None]:
+    """播放期間把 active 計數 +1；歸零時記下結束時間。"""
+    global _OUTPUT_ACTIVE, _OUTPUT_ENDED_AT
+    with _OUTPUT_LOCK:
+        _OUTPUT_ACTIVE += 1
+    try:
+        yield
+    finally:
+        with _OUTPUT_LOCK:
+            _OUTPUT_ACTIVE = max(0, _OUTPUT_ACTIVE - 1)
+            if _OUTPUT_ACTIVE == 0:
+                _OUTPUT_ENDED_AT = time.monotonic()
+
+
 def play_file(path: str, cfg: AudioConfig, logger=None) -> bool:
     """依 cfg.players 順序嘗試播放檔案。成功回傳 True。"""
+    with _output_active():
+        return _play_file_inner(path, cfg, logger)
+
+
+def _play_file_inner(path: str, cfg: AudioConfig, logger=None) -> bool:
     for tmpl in cfg.players:
         # 先用 shlex 拆成 argv，再把 {file} 佔位符換成實際路徑（保證含空白路徑也正確）
         argv = [part.replace("{file}", path) for part in shlex.split(tmpl)]

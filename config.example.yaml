@@ -61,6 +61,12 @@ wake:
   verify_prefixes: [hey, hay, a, the, he, ok, okay, hi]
   verify_variants: [hermes, homes, hums, hermis, hermes's]
   verify_min_conf: 0.3    # 全詞彙 per-word 信心度門檻（否決力來自 variants 集合，見 config.py 註解）
+  # 半雙工：我們自己在出聲（提示音／語音回報 TTS）時，這段時間內不做喚醒偵測。
+  # 為什麼：語音回報的 TTS 是在背景 thread 播的，主迴圈同時已經回到麥克風上聽
+  # → 它會把自己的聲音收進來當成「hey hermes」→ 誤喚醒 → 連響好幾聲咚咚。
+  # 播放期間一定靜音；播完再等這個秒數讓殘響／裝置緩衝排掉才恢復監聽。
+  # 設 0 ＝關掉半雙工（回到舊行為）。
+  echo_guard_sec: 0.8
   # ── mode="clap"（舊路徑）才用 ──────────────────────────────
   window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
   cooldown_sec: 10.0      # 喚醒詞沒過之後的冷卻秒數

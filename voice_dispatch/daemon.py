@@ -154,6 +154,39 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R1：喚醒
     # ------------------------------------------------------------------
+    def _echo_muted(self) -> bool:
+        """半雙工閘：我們自己在出聲（或剛出聲完）時，不做喚醒偵測。
+
+        兩個來源都要擋：
+          ① 正在播（`audio.output_busy()`）——可能是背景 thread 在播語音回報；
+          ② 剛播完的殘響／裝置緩衝（`wake.echo_guard_sec` 秒內）。
+
+        不做的話它會把自己的提示音／TTS 收回來當成「hey hermes」→ 誤喚醒 →
+        再播一輪提示音 → 連響（2026-09-26 使用者回報的症狀）。
+        """
+        if audio.output_busy():
+            return True
+        guard = float(getattr(self.cfg.wake, "echo_guard_sec", 0.0) or 0.0)
+        if guard <= 0.0:
+            return False
+        return audio.output_quiet_sec() < guard
+
+    def _skip_echo_blocks(self, blocks):
+        """把「我們自己在出聲」期間的區塊濾掉（給不自己判狀態的消費端用）。"""
+        muted = False
+        for block in blocks:
+            if self._stop:
+                return
+            if self._echo_muted():
+                if not muted:
+                    muted = True
+                    log.debug("自己在出聲 → 暫停喚醒偵測（半雙工）")
+                continue
+            if muted:
+                muted = False
+                log.debug("恢復喚醒偵測")
+            yield block
+
     def _wait_for_wake_kws(self) -> bool:
         """串接式 KWS 喚醒，命中就回 True。
 
@@ -174,9 +207,20 @@ class VoiceDispatcher:
                     frozen_max_blocks=self.cfg.audio.frozen_max_blocks,
                     on_frozen=self._frozen_cb(frozen),
                 )
+                muted = False
                 for block in blocks:
                     if self._stop:
                         return False
+                    if self._echo_muted():
+                        if not muted:
+                            muted = True
+                            log.debug("自己在出聲 → 暫停喚醒偵測（半雙工）")
+                        continue
+                    if muted:
+                        muted = False
+                        # 靜音期間完全沒餵過偵測器，但 ring 裡還留著播放前的音訊
+                        wake_detect.reset()
+                        log.debug("恢復喚醒偵測")
                     hit = wake_detect.feed(block)
                     if hit:
                         log.info("喚醒詞確認：%s", hit)
@@ -222,7 +266,8 @@ class VoiceDispatcher:
                     on_frozen=self._frozen_cb(frozen),
                 )
                 detected = wake.run_clap_loop(
-                    blocks, self.cfg, should_stop=lambda: self._stop
+                    self._skip_echo_blocks(blocks), self.cfg,
+                    should_stop=lambda: self._stop,
                 )
                 if self._stop:
                     return False

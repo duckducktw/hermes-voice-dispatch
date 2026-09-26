@@ -145,6 +145,14 @@ class WakeConfig:
     #   被全詞彙聽成 'he hands'，那是文字層問題、降門檻救不到）。
     #   → 降門檻純賺 recall、量測不到 FP 代價。要更保守就把它加回 0.5。
     verify_min_conf: float = 0.3       # 全詞彙 per-word 信心度門檻
+    # ── 半雙工：我們自己在出聲時不做喚醒偵測 ──────────────────────
+    # 2026-09-26 使用者回報「說完需求後，過一下子會連響好幾聲咚咚」。
+    # 根因：語音回報的 TTS 在**背景 thread** 播（daemon.py `_watch_thread_for_result`），
+    # 主迴圈同時間已經回到 wait_for_wake() 在聽 → 把自己的聲音（提示音/TTS）收進來
+    # → 誤喚醒 → 播一輪提示音 → 又收回來 → 連響；遠場（隔著桌面）尤其明顯。
+    # 修法＝播放期間完全不餵音訊給喚醒偵測器，播完再等 echo_guard_sec 讓殘響／
+    # 裝置緩衝排掉才恢復監聽。設 0 ＝關掉半雙工（回到舊行為）。
+    echo_guard_sec: float = 0.8
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0
