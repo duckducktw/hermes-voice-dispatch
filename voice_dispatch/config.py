@@ -135,24 +135,30 @@ class WakeConfig:
     # 收訊期間每隔多久試判一次：越小越早醒、越吃 CPU（每次確認 ~40ms）。
     # 實測最大喚醒延遲：0.15→108ms、0.2→172ms、0.3→300ms（中位數都遠早於語音結束）。
     verify_interval_sec: float = 0.15
-    # 接受規則＝轉錄中出現 (前綴)(變體) 相鄰 bigram。"Hermes" 常被聽成 homes/hums，
-    # "hey" 開頭也常被聽成 a/the，故兩側放寬；否決力來自變體集合本身
-    # （hermit/mess/miss/mouse/mom/harm 皆不在其中 → 否決）。
+    # 接受規則＝轉錄中出現 (前綴)(變體) 相鄰 bigram。「Hermes」常被聽成 homes/hums，
+    # 「hey」開頭也常被聽成 a/the，故兩側放寬；否決力來自變體集合本身
+    # （hermit/mess/miss/mouse/mom 皆不在其中 → 否決）。
     verify_prefixes: List[str] = field(default_factory=lambda: [
         "hey", "hay", "a", "the", "he", "ok", "okay", "hi",
     ])
+    # 2026-09-26 使用者「讓他更寬鬆點，我剛剛叫了幾次不回」→ 用**實際 log 的失敗轉錄**
+    # 補變體。當晚實測（daemon log：hey 閘門響了、但窗內 decode 成這些字）：
+    #   'hey harm if' → harm ／ 'hey her me' → her（hermes 被切成兩字）／ 'hi harry' → harry
+    #   'the army' → army ／ 'hey hurries' → hurries ／ 'here' → here
+    # 這些原本都不在集合裡 → 一律被否決，就是「叫了幾次不回」的主因。
+    # 仍保留否決力：hermit／her mess／her mouse 等近似音依然不在集合內。
     verify_variants: List[str] = field(default_factory=lambda: [
         "hermes", "homes", "hums", "hermis", "hermès", "hermes's",
+        "harm", "her", "harry", "army", "hurries", "hurry", "here",
+        "herm", "herms", "hermies", "hermiss", "hurmes", "hermas",
     ])
-    # 2026-09-26 由 0.5 降到 0.3（使用者「一直無法呼叫到語音助手」的實證修正）：
-    #   當天 log 出現「確認轉錄 'hey hermes hey'」卻被否決 → 文字已經對了，是被這個
-    #   confidence 門檻擋掉（受限詞彙/遠場收音時，正確的 hermes 常只有 0.3~0.45）。
-    #   **否決力其實來自 `verify_variants` 集合本身，不是這個門檻**：微評測 44 句
-    #   （正樣本 12／危險負樣本 44，含 hey hermit / her mess / Hey her mouse / hay her mess…）
-    #   在 0.5 / 0.35 / 0.3 / 0.0 四段門檻下 **FP 都是 0/44**（唯一漏判是印度口音
-    #   被全詞彙聽成 'he hands'，那是文字層問題、降門檻救不到）。
-    #   → 降門檻純賺 recall、量測不到 FP 代價。要更保守就把它加回 0.5。
-    verify_min_conf: float = 0.3       # 全詞彙 per-word 信心度門檻
+    # 2026-09-26 兩段降門檻：0.5→0.3（log 出現「確認轉錄 'hey hermes hey'」卻被否決＝
+    # 文字已對、被門檻擋掉）→ 0.3→0.1（新案例 'hi harry' 的 harry 只有 0.235）。
+    # 微評測證明否決力來自 `verify_variants` 集合、不是門檻（0.5/0.35/0.3/0.0 的 FP
+    # 都是 0/44）→ 降門檻純賺 recall。
+    verify_min_conf: float = 0.1       # 全詞彙 per-word 信心度門檻
+    # ⚠️ 放寬後若出現**誤喚醒**（沒喊也響咚咚）→ 看 log 的「確認轉錄」是什麼字；
+    # 若是常見詞（例：the army／here）就把那個變體從 verify_variants 拿掉。
     # ── 半雙工：我們自己在出聲時不做喚醒偵測 ──────────────────────
     # 2026-09-26 使用者回報「說完需求後，過一下子會連響好幾聲咚咚」。
     # 根因：語音回報的 TTS 在**背景 thread** 播（daemon.py `_watch_thread_for_result`），
