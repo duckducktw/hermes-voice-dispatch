@@ -417,6 +417,7 @@ class VoiceDispatcher:
         `"voice"`：舊行為（可選 beep + TTS 引導語，重問時換一句）。
         """
         if self.cfg.tts.prompt_mode == "chime":
+            log.info("提示音：開始（cue=start）")
             tts.play_chime(self.cfg, logger=log, cue="start")
             return
         if self.cfg.tts.beep_enabled:
@@ -435,6 +436,7 @@ class VoiceDispatcher:
         而且兩聲要**明顯不同**才不會搞錯現在是哪個階段。
         """
         if self.cfg.tts.prompt_mode == "chime":
+            log.info("提示音：結束（cue=end）")
             tts.play_chime(self.cfg, logger=log, cue="end")
 
     def prompt_and_capture(self, stream, attempt: int = 0) -> Optional[str]:
