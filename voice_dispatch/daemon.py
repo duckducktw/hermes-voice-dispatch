@@ -556,7 +556,8 @@ class VoiceDispatcher:
             short_len=self.cfg.discord.thread_short_len,
             limit=self.cfg.discord.thread_name_limit,
         )
-        card = self.cfg.discord.card_template.format(transcript=transcript)
+        card = self.cfg.discord.card_template.format(transcript=transcript,
+                                                     date=now.strftime("%Y-%m-%d %H:%M:%S"))
         task_card = self.cfg.discord.task_card_template.format(
             transcript=transcript,
             date=now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -581,7 +582,9 @@ class VoiceDispatcher:
         if not thread_id:
             raise RuntimeError(f"Discord 未回傳 thread id：{thread}")
 
-        client.post_thread_message(thread_id, task_card)
+        # 串內任務卡：**留空＝不發**（2026-09-26 使用者：「幾則就好」→ 已併入串首訊息）。
+        if task_card.strip():
+            client.post_thread_message(thread_id, task_card)
 
         prompt = dispatch.build_dispatch_prompt(
             transcript, channel_id, thread_id, self.cfg
@@ -645,7 +648,8 @@ class VoiceDispatcher:
             """
             import threading as _th
 
-            quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 60.0) or 60.0)
+            quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 8.0) or 8.0)
+            poll_interval = float(getattr(self.cfg.tts, "speak_result_poll_sec", 2.0) or 2.0)
             deadline = time.time() + 25 * 60
 
             def _is_notice(text: str) -> bool:
@@ -704,7 +708,7 @@ class VoiceDispatcher:
                             except Exception as exc:  # noqa: BLE001
                                 log.warning("語音回報失敗：%s", exc)
                         return
-                    time.sleep(5)
+                    time.sleep(poll_interval)
 
             _th.Thread(target=_loop, daemon=True).start()
 
@@ -723,7 +727,9 @@ class VoiceDispatcher:
                 log.error("relay 送出失敗：%s → 回退 spawn hermes", exc)
                 use_relay = False
             else:
-                client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
+                # 派工通知：留空＝不發（gateway 接手後自己會回一則，這則是多餘的）。
+                if self.cfg.discord.dispatched_notice.strip():
+                    client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
                 if self.cfg.tts.prompt_mode != "chime":
                     tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
                 log.info("relay 派工完成（gateway 接手），thread=%s", thread_id)
@@ -744,7 +750,8 @@ class VoiceDispatcher:
             except Exception as inner:  # noqa: BLE001
                 log.error("連失敗通知都發不出去：%s", inner)
             return
-        client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
+        if self.cfg.discord.dispatched_notice.strip():
+            client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
         # chime 模式：整場只有「開始咚／結束咚」兩聲，派工後不再出聲
         if self.cfg.tts.prompt_mode != "chime":
             tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)

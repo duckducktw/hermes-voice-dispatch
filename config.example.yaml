@@ -85,9 +85,10 @@ confirm:                  # 回述確認
   disagree_words: ["不", "錯", "重講", "再說", "重來", "no"]
 
 tts:
-  voice: "zh-CN-XiaoyiNeural"
-  # 其他不錯的：zh-TW-HsiaoYuNeural / zh-TW-YunJheNeural / zh-CN-XiaoxiaoNeural /
-  #             zh-CN-YunxiNeural / zh-CN-YunyangNeural
+  voice: "zh-CN-XiaoxiaoNeural"
+  # 其他不錯的：zh-TW-HsiaoChenNeural / zh-TW-YunJheNeural / zh-CN-YunyangNeural /
+  #             zh-CN-YunjianNeural / zh-CN-YunxiNeural（2026-09-26 使用者要「成熟點」，
+  #             樣本見 skill；XiaoyiNeural 是 Cartoon/Lively＝偏活潑幼，已換掉）
   # 列出全部：edge-tts --list-voices | grep zh
   ok_prompt: "OK，請說出你的需求。"
   confirm_template: "我理解成：{transcript}。對嗎？"
@@ -131,16 +132,17 @@ discord:
   guild_id: "1340241728959025236"
   auto_archive_duration: 1440          # thread 自動封存（分鐘）
   thread_name_limit: 100               # Discord thread 名長度上限
-  card_template: "🎙️ \"{transcript}\""
-  thread_name_template: "🎙️ {short}"
-  thread_short_len: 40
-  task_card_template: |-
+  card_template: |-
     **🎙️ 語音任務**
-    需求原文：
     > {transcript}
 
-    建立時間：{date}
-  dispatched_notice: "✅ 收到，開始處理。"
+    `{date}`
+  thread_name_template: "🎙️ {short}"
+  thread_short_len: 40
+  # 串內再補一則任務卡（**留空＝不發**；預設不發，需求已併入 card_template）。
+  task_card_template: ""
+  # 派工通知（**留空＝不發**；gateway 接手後自己會回，這則是多餘的）。
+  dispatched_notice: ""
   env_file: "~/.hermes/.env"           # 讀 DISCORD_BOT_TOKEN 的來源
   token_env: "DISCORD_BOT_TOKEN"
   timeout_sec: 30.0

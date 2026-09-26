@@ -243,6 +243,13 @@ class TtsConfig:
     # 只念一句短摘要（`spoken_summary` 去掉 Markdown、截斷），完整內容仍在 Discord 串內。
     speak_result: bool = True
     speak_result_max_chars: int = 160
+    # relay 模式：盯討論串、等它安靜幾秒就把最後一則 agent 訊息念出來。
+    # 2026-09-26 使用者：「TTS 合成加速，現在跑完還要等一下才能聽到」——
+    # 元凶就是這個安靜判定原本 60s（實測 16:54 回覆、16:55:08 才出聲＝慢 66s）。
+    # 降到 8s：串流結束後幾乎立刻念，又還留有餘裕避免唸到半截的訊息。
+    speak_result_quiet_sec: float = 8.0
+    # 盯串的輪詢間隔（越小越快發現新訊息，越吃 API 額度）。
+    speak_result_poll_sec: float = 2.0
     # 咚咚＝「有質感的」雙音提示。
     # 兩次退貨記錄（2026-09-25）：
     #   1. 純正弦 + 衰減 → 「空洞的咚咚」
@@ -315,17 +322,21 @@ class DiscordConfig:
     guild_id: str = "1340241728959025236"
     auto_archive_duration: int = 1440          # thread 自動封存（分鐘）
     thread_name_limit: int = 100               # Discord thread 名長度上限
-    card_template: str = "🎙️ \"{transcript}\""
-    thread_name_template: str = "🎙️ {short}"
-    thread_short_len: int = 40                 # thread 名取轉錄前幾字
-    task_card_template: str = (
+    # 串首訊息（＝發在母頻道、也是討論串起點的那一則）：一則就把需求講清楚。
+    # 2026-09-26 使用者：「對話記錄不要這麼多訊息，幾則就好」→ 合併原本的
+    # card + task_card 兩則為一則（原本一輪語音會留 5 則訊息，現在 3 則）。
+    card_template: str = (
         "**🎙️ 語音任務**\n"
-        "需求原文：\n"
         "> {transcript}\n"
         "\n"
-        "建立時間：{date}"
+        "`{date}`"
     )
-    dispatched_notice: str = "✅ 收到，開始處理。"
+    thread_name_template: str = "🎙️ {short}"
+    thread_short_len: int = 40                 # thread 名取轉錄前幾字
+    # 串內再補一則任務卡（**留空＝不發**；預設不發，避免洗版）。
+    task_card_template: str = ""
+    # 派工通知（**留空＝不發**；gateway 接手後自己會回，這則是多餘的）。
+    dispatched_notice: str = ""
     # token 來源
     env_file: str = "~/.hermes/.env"
     token_env: str = "DISCORD_BOT_TOKEN"
