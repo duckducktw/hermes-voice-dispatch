@@ -301,6 +301,13 @@ class TtsConfig:
     speak_result_quiet_sec: float = 8.0
     # 盯串的輪詢間隔（越小越快發現新訊息，越吃 API 額度）。
     speak_result_poll_sec: float = 2.0
+    # (c) 方案（2026-09-26 使用者選定）：回合結束後還要「再安靜這麼久」才唸 ——
+    # 避免 agent 只是換口氣、馬上又繼續跑，就把中間那則當結果唸掉。
+    speak_result_settle_sec: float = 20.0
+    # 重新武裝：唸完**不結束**，之後每有新回合結束就再唸一次（最終結果一定聽得到）。
+    # 上限：同一個串最多唸幾次 + 最多盯多久，免得使用者在串內閒聊一直被唸。
+    speak_result_max_speaks: int = 3
+    speak_result_watch_sec: float = 1800.0
     # relay 模式判斷「回合真的結束」用的 Hermes session DB。判斷依據（實測）：
     #   回合結束 = 最後一則 role=assistant/finish_reason='stop' 的訊息
     #              ＋緊接一筆 role=session_meta 收尾列。

@@ -33,6 +33,28 @@ def _as_list(x) -> list:
     """把 Discord GET 的回應正規化成 list（出錯時可能是 dict 或 None）。"""
     return x if isinstance(x, list) else []
 
+
+def pick_report(rows, last_spoken_id: int) -> Optional[tuple]:
+    """從「已結束回合」的 assistant 訊息中挑出該唸的那一則。
+
+    `rows`＝[(id, role, content, finish_reason), ...]（同一 session、依 id 排序，可由
+    SQL 先篩掉非 (assistant, finish_reason='stop') 的列）。回傳 `(id, content)`＝最新
+    一則有內容、且 `id > last_spoken_id` 的訊息；沒有就回 `None`（＝這一輪沒有新結果）。
+
+    2026-09-26 (c) 方案：重新武裝時靠 `last_spoken_id` 記住上次唸到哪一則，
+    所以同一則不會被唸第二次。
+    """
+    best = None
+    for mid, role, content, fr in rows:
+        if role != "assistant" or fr != "stop":
+            continue
+        if not str(content or "").strip():
+            continue
+        if int(mid) <= int(last_spoken_id):
+            continue
+        best = (int(mid), str(content))
+    return best
+
 log = logging.getLogger("voice_dispatch")
 
 
@@ -861,28 +883,38 @@ class VoiceDispatcher:
         def _watch_thread_for_result():
             """relay 模式專用：agent 交給 gateway 跑，我們讀不到它的 stdout。
 
-            2026-09-26 使用者定案兩件事：
+            2026-09-26 使用者定案：
               「TTS 合成加速，現在跑完還要等一下才能聽到」
               「只有回報要說，中間思考、做事不要說話」
-            → 不再用「串內安靜 N 秒」猜（那會在 agent 跑很久時唸到中間訊息、又慢），
-              改成讀 Hermes 的 session DB（~/.hermes/state.db）。一個**真正結束**的
-              回合實測長這樣：
+              「為什麼有些任務明明還沒跑完卻直接回覆我，而且是進度不是結果」→ 選 (c)
+            → 讀 Hermes 的 session DB（~/.hermes/state.db）。一個**真正結束**的回合實測長這樣：
 
                   role=assistant, finish_reason='stop'   ← 最終回覆
                   role=session_meta                      ← 回合收尾列
 
-              只有看到「新的」session_meta 才把前面的最終回覆念出來。
-              (a) 絕不唸中間訊息；(b) 回合一結束幾乎立刻出聲。
-            讀不到 DB／20 秒內找不到對應 session 時，退回舊的「等安靜 quiet 秒讀串」。
+            (c) ＝**安靜緩衝 ＋ 重新武裝**：
+              - 安靜緩衝（`speak_result_settle_sec`，預設 20s）：看到 session_meta 後，還要
+                「這 N 秒內 DB 都沒有新訊息」才唸。避免 agent 只是換口氣、馬上又繼續跑，
+                就把中間那則當結果唸掉。
+              - 重新武裝：唸完**不結束**，繼續盯；之後又有新回合結束就再唸一次 →
+                最終結果一定聽得到（實測踩到的情境：22:05 結束第一回合 → 使用者 22:09
+                才追加 → 22:18 才有最終結果，舊版唸完第一則就收工了）。
+                上限：同一個串最多唸 `speak_result_max_speaks`（3）次、
+                總共只盯 `speak_result_watch_sec`（1800s＝30 分），免得在串內閒聊被唸。
+            讀不到 DB／20 秒內找不到對應 session 時，退回舊的「等安靜 quiet 秒讀串」（單次）。
             """
             import threading as _th
 
             quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 8.0) or 8.0)
             poll_interval = float(getattr(self.cfg.tts, "speak_result_poll_sec", 2.0) or 2.0)
             max_chars = int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160)
+            settle_sec = float(getattr(self.cfg.tts, "speak_result_settle_sec", 20.0) or 20.0)
+            max_speaks = int(getattr(self.cfg.tts, "speak_result_max_speaks", 3) or 3)
+            watch_sec = float(
+                getattr(self.cfg.tts, "speak_result_watch_sec", 1800.0) or 1800.0)
             db_path = os.path.expanduser(
                 getattr(self.cfg.tts, "speak_result_session_db", "~/.hermes/state.db"))
-            deadline = time.time() + 25 * 60
+            deadline = time.time() + watch_sec
 
             def _speak(text: str) -> bool:
                 try:
@@ -910,7 +942,12 @@ class VoiceDispatcher:
                 )
 
             def _db_watch() -> Optional[bool]:
-                """盯 session DB 等回合結束。True＝念完了；False＝此路不通，改用讀串。"""
+                """盯 session DB：回合結束＋安靜 settle 秒 → 唸最終回覆；唸完**繼續盯**。
+
+                (c) 的行為：命中一次之後不結束，重新武裝等下一個回合（上限 max_speaks 次、
+                最多盯 deadline）。回傳 True＝至少唸過一次（成功）；
+                False＝此路不通（沒 session／讀不到），改走讀串備援。
+                """
                 import sqlite3
                 try:
                     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
@@ -919,6 +956,9 @@ class VoiceDispatcher:
                     log.warning("開不了 session DB（%s）→ 退回讀串判定", exc)
                     return False
                 sid, since = "", 0
+                spoken = 0              # 已唸次數（上限 max_speaks）
+                last_spoken_id = 0      # 已唸到哪一則（同一則不重複唸）
+                last_activity = time.time()
                 find_until = time.time() + 20.0
                 try:
                     while time.time() < deadline and not self._stop:
@@ -932,35 +972,59 @@ class VoiceDispatcher:
                                 since = int(con.execute(
                                     "select coalesce(max(id),0) from messages where session_id=?",
                                     (sid,)).fetchone()[0])
-                                log.info("語音回報：鎖定 session %s（改等回合結束）", sid)
+                                log.info(
+                                    "語音回報：鎖定 session %s（等回合結束＋安靜 %.0f 秒，"
+                                    "最多唸 %d 次）", sid, settle_sec, max_speaks)
                             elif time.time() > find_until:
                                 log.info("語音回報：找不到對應 session → 退回讀串判定")
                                 return False
                             time.sleep(poll_interval)
                             continue
+
                         rows = list(con.execute(
                             "select id, role, coalesce(content,''), coalesce(finish_reason,'') "
                             "from messages where session_id=? and id>? order by id",
                             (sid, since)))
                         if rows:
                             since = max(since, rows[-1][0])
-                            finished = any(r[1] == "session_meta" for r in rows)
-                            final = ""
-                            for _mid, role, content, fr in rows:
-                                if role == "assistant" and fr == "stop" and content.strip():
-                                    final = content
-                            if finished and final:
-                                return _speak(final)
+                            last_activity = time.time()
+
+                        # 條件：至少有一個回合收尾列（session_meta）＋ 這 settle 秒內 DB 沒動靜
+                        finished = bool(con.execute(
+                            "select 1 from messages where session_id=? and role='session_meta' "
+                            "limit 1", (sid,)).fetchone())
+                        if finished and (time.time() - last_activity) >= settle_sec:
+                            pick = pick_report(
+                                list(con.execute(
+                                    "select id, role, coalesce(content,''), "
+                                    "coalesce(finish_reason,'') from messages "
+                                    "where session_id=? and id>? and role='assistant' "
+                                    "and coalesce(finish_reason,'')='stop' order by id",
+                                    (sid, last_spoken_id))),
+                                last_spoken_id,
+                            )
+                            if pick:
+                                mid, content = pick
+                                if _speak(content):
+                                    spoken += 1
+                                    last_spoken_id = mid
+                                    last_activity = time.time()
+                                    log.info("語音回報：第 %d/%d 次唸完（msg=%s）→ 繼續盯",
+                                             spoken, max_speaks, mid)
+                                    if spoken >= max_speaks:
+                                        return True
+                                else:
+                                    return False
                         time.sleep(poll_interval)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("讀 session DB 失敗（%s）→ 退回讀串判定", exc)
-                    return False
+                    return bool(spoken)
                 finally:
                     try:
                         con.close()
                     except Exception:  # noqa: BLE001
                         pass
-                return False
+                return bool(spoken)
 
             def _thread_watch():
                 """備援：舊的「等安靜 quiet 秒 → 唸串內最後一則 agent 訊息」。"""
