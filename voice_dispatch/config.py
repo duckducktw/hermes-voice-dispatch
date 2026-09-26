@@ -81,16 +81,24 @@ class ClapConfig:
 
 @dataclass
 class WakeConfig:
-    # 喚醒方式：
-    #   "kws" = 現行 Vosk 串接式 KWS（預設，保留既有行為）
-    #   "openwakeword" = 自訂 hey_hermes ONNX 神經網路 KWS
-    #   "clap" = 舊做法：拍手兩下 → 錄一段 → STT 比對字串（慢、易幻覺，只留作退路）
-    mode: str = "kws"
+    # 喚醒方式（2026-09-26 使用者定案：**波形判斷**）：
+    #   "openwakeword" = 預設。直接吃音訊波形（80ms 幀 → mel + embedding → ONNX 分類），
+    #       **完全不經過 STT 文字** → 「hermes 被 Vosk 聽成 harry/army/her me」那整類
+    #       漏判結構性消失（前三輪都在補文字變體，天花板就在那裡）。
+    #       離線校準（TTS 樣本）：正 'hey hermes' 0.962~0.969；負 hey harry／the army／
+    #       her mess／hermit／白噪音 全部 0.000~0.001。
+    #       ⚠️ 代價：`import openwakeword` +182MB RSS。模型或套件不可用時會自動回退 "kws"。
+    #   "kws" = Vosk 兩階段（hey 閘門 → hermes 全詞彙確認）。保留為**回退**路徑。
+    #   "clap" = 舊做法：拍手兩下 → 錄一段 → STT 比對字串（慢、易幻覺，只留作退路）。
+    mode: str = "openwakeword"
     # ── mode="openwakeword" ──────────────────────────────────────
     # Hermes 內建的已訓練 hey_hermes 模型；路徑可由 YAML 覆寫。
     oww_model: str = "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
-    oww_threshold: float = 0.6
-    oww_confirmation_frames: int = 3
+    # 0.5 在離線校準裡很寬（正/負差 ~1000 倍）。真實房間分數會比 TTS 低 →
+    # 叫不醒往下調（0.3→0.2）、誤喚醒往上調。
+    oww_threshold: float = 0.5
+    # 連續幾個 80ms 幀都過門檻才算命中（預設 3；2 = 寬鬆一點、早 80ms 醒）。
+    oww_confirmation_frames: int = 2
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。

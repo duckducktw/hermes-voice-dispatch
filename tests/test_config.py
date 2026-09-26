@@ -21,9 +21,9 @@ def test_defaults():
     assert "hermes" in cfg.wake.keywords
     assert cfg.discord.auto_archive_duration == 1440
     assert cfg.discord.thread_name_limit == 100
-    assert cfg.wake.mode == "kws"
-    assert cfg.wake.oww_threshold == 0.6
-    assert cfg.wake.oww_confirmation_frames == 3
+    assert cfg.wake.mode == "openwakeword"   # 2026-09-26 定案：預設走波形判斷
+    assert cfg.wake.oww_threshold == 0.5
+    assert cfg.wake.oww_confirmation_frames == 2
 
 
 def test_openwakeword_yaml_override(tmp_path):
