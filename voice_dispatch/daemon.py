@@ -640,24 +640,49 @@ class VoiceDispatcher:
                 log.warning("心跳發送失敗：%s", exc)
 
         def _watch_thread_for_result():
-            """relay 模式專用：agent 由 gateway 接手跑，我們沒有 stdout 可以讀，所以改成
-            **盯討論串**——等串內安靜下來（連續 `quiet` 秒沒有新訊息）就取最後一則當結果
-            用「講的」回報，藉此保住原本的語音回報功能。硬上限 25 分鐘。
+            """relay 模式專用：agent 交給 gateway 跑，我們讀不到它的 stdout。
 
-            用 nested function + daemon thread 跑，不阻塞主迴圈。
+            2026-09-26 使用者定案兩件事：
+              「TTS 合成加速，現在跑完還要等一下才能聽到」
+              「只有回報要說，中間思考、做事不要說話」
+            → 不再用「串內安靜 N 秒」猜（那會在 agent 跑很久時唸到中間訊息、又慢），
+              改成讀 Hermes 的 session DB（~/.hermes/state.db）。一個**真正結束**的
+              回合實測長這樣：
+
+                  role=assistant, finish_reason='stop'   ← 最終回覆
+                  role=session_meta                      ← 回合收尾列
+
+              只有看到「新的」session_meta 才把前面的最終回覆念出來。
+              (a) 絕不唸中間訊息；(b) 回合一結束幾乎立刻出聲。
+            讀不到 DB／20 秒內找不到對應 session 時，退回舊的「等安靜 quiet 秒讀串」。
             """
             import threading as _th
 
             quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 8.0) or 8.0)
             poll_interval = float(getattr(self.cfg.tts, "speak_result_poll_sec", 2.0) or 2.0)
+            max_chars = int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160)
+            db_path = os.path.expanduser(
+                getattr(self.cfg.tts, "speak_result_session_db", "~/.hermes/state.db"))
             deadline = time.time() + 25 * 60
 
+            def _speak(text: str) -> bool:
+                try:
+                    summary = spoken_summary(text, max_chars)
+                    if not summary:
+                        return False
+                    log.info("語音回報結果：%s", summary[:80])
+                    tts.speak(summary, self.cfg, logger=log)
+                    return True
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("語音回報失敗：%s", exc)
+                    return False
+
             def _is_notice(text: str) -> bool:
-                """串內「非 agent 回覆」的訊息（我們的公告／心跳／relay 原文）——不該被當結果唸。"""
+                """串內「非 agent 最終回覆」的訊息（公告／心跳／relay 原文）——不該被唸。"""
                 t = text.strip()
                 return (
                     not t
-                    or "<@" in t                      # relay 進去的需求原文
+                    or "<@" in t
                     or t.startswith("🎙️")
                     or t.startswith("✅ 收到")
                     or t.startswith("⏳")
@@ -665,11 +690,64 @@ class VoiceDispatcher:
                     or "仍在處理中" in t
                 )
 
-            def _loop():
+            def _db_watch() -> Optional[bool]:
+                """盯 session DB 等回合結束。True＝念完了；False＝此路不通，改用讀串。"""
+                import sqlite3
+                try:
+                    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+                    con.execute("pragma query_only=1")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("開不了 session DB（%s）→ 退回讀串判定", exc)
+                    return False
+                sid, since = "", 0
+                find_until = time.time() + 20.0
+                try:
+                    while time.time() < deadline and not self._stop:
+                        if not sid:
+                            row = con.execute(
+                                "select id from sessions where (thread_id=? or chat_id=?) "
+                                "order by started_at desc limit 1",
+                                (thread_id, thread_id)).fetchone()
+                            if row:
+                                sid = row[0]
+                                since = int(con.execute(
+                                    "select coalesce(max(id),0) from messages where session_id=?",
+                                    (sid,)).fetchone()[0])
+                                log.info("語音回報：鎖定 session %s（改等回合結束）", sid)
+                            elif time.time() > find_until:
+                                log.info("語音回報：找不到對應 session → 退回讀串判定")
+                                return False
+                            time.sleep(poll_interval)
+                            continue
+                        rows = list(con.execute(
+                            "select id, role, coalesce(content,''), coalesce(finish_reason,'') "
+                            "from messages where session_id=? and id>? order by id",
+                            (sid, since)))
+                        if rows:
+                            since = max(since, rows[-1][0])
+                            finished = any(r[1] == "session_meta" for r in rows)
+                            final = ""
+                            for _mid, role, content, fr in rows:
+                                if role == "assistant" and fr == "stop" and content.strip():
+                                    final = content
+                            if finished and final:
+                                return _speak(final)
+                        time.sleep(poll_interval)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("讀 session DB 失敗（%s）→ 退回讀串判定", exc)
+                    return False
+                finally:
+                    try:
+                        con.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return False
+
+            def _thread_watch():
+                """備援：舊的「等安靜 quiet 秒 → 唸串內最後一則 agent 訊息」。"""
                 c = DiscordClient(self.cfg, logger=log)
                 last_seen = ""
                 last_change = time.time()
-                spoken = ""
                 bot_id = str(getattr(self.cfg.relay, "mention_id", ""))
                 while time.time() < deadline and not self._stop:
                     try:
@@ -677,14 +755,11 @@ class VoiceDispatcher:
                     except Exception:  # noqa: BLE001
                         time.sleep(10)
                         continue
-                    # 變動偵測看「全部訊息」（含公告／relay），任一動靜就重置安靜計時。
                     newest = max((str(m.get("id", "")) for m in msgs), default="")
                     if newest and newest != last_seen:
                         last_seen = newest
                         last_change = time.time()
                     elif last_seen and (time.time() - last_change) >= quiet_needed:
-                        # 安靜下來：取「agent 自己（gateway bot）發的、非公告」的最後一則當結果。
-                        text = ""
                         for m in msgs:
                             author_id = str((m.get("author") or {}).get("id", ""))
                             content = str(m.get("content", ""))
@@ -692,23 +767,15 @@ class VoiceDispatcher:
                                 continue
                             if _is_notice(content):
                                 continue
-                            text = content
-                            break
-                        text = text.strip()
-                        if text and text != spoken:
-                            try:
-                                summary = spoken_summary(
-                                    text,
-                                    int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160),
-                                )
-                                if summary:
-                                    log.info("語音回報結果（relay 模式，讀串）：%s", summary[:80])
-                                    tts.speak(summary, self.cfg, logger=log)
-                                    spoken = text
-                            except Exception as exc:  # noqa: BLE001
-                                log.warning("語音回報失敗：%s", exc)
+                            _speak(content.strip())
+                            return
                         return
                     time.sleep(poll_interval)
+
+            def _loop():
+                if _db_watch() is True:
+                    return
+                _thread_watch()
 
             _th.Thread(target=_loop, daemon=True).start()
 

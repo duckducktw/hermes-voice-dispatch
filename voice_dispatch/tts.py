@@ -1,6 +1,11 @@
-"""TTS：用 numpy 合成 beep 提示音；用 edge-tts 合成語音並播放。
+"""TTS：用 numpy 合成 beep 提示音；用 edge-tts／Gemini TTS 合成語音並播放。
 
-edge-tts 需要網路；在 --dry-run / 測試時不會呼叫網路（由呼叫端控制）。
+合成引擎由 `tts.engine` 決定：
+  - "edge"（預設）＝ edge-tts（免費、快，但合成腔明顯）
+  - "gemini"＝ Google Gemini TTS（更像真人，可用「風格指示」演出商業大佬口吻；
+    免費層每 model 每天 10 次 → 會在多個 model 之間輪替，全掛才退回 edge-tts）
+
+兩者都需要網路；在 --dry-run / 測試時不會呼叫網路（由呼叫端控制）。
 """
 
 from __future__ import annotations
@@ -301,6 +306,109 @@ def synth_to_file(text: str, out_path: str, voice: str, rate: str = "") -> str:
     return out_path
 
 
+def _gemini_api_key(cfg: Config) -> str:
+    """取 Gemini API key：先看環境變數，再讀 ~/.hermes/.env。"""
+    name = getattr(cfg.tts, "gemini_api_key_env", "GOOGLE_API_KEY") or "GOOGLE_API_KEY"
+    if os.environ.get(name):
+        return os.environ[name]
+    path = expand(getattr(cfg.tts, "gemini_env_file", "~/.hermes/.env") or "")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _gemini_write_audio(data: bytes, out_path: str) -> None:
+    """Gemini 有時回 WAV、有時回裸 PCM（24kHz s16le mono）→ 一律轉成 mp3。
+
+    只信 RIFF magic：實測 gemini-3.8 回真 WAV，gemini-3.1 回裸 PCM 但
+    mimeType 照樣寫 "audio/wav"（信 header 會踩雷，ffmpeg 直接 Invalid data）。
+    """
+    if data[:4] == b"RIFF":
+        src, args = out_path + ".wav", ["-i", out_path + ".wav"]
+    else:
+        src = out_path + ".pcm"
+        args = ["-f", "s16le", "-ar", "24000", "-ac", "1", "-i", out_path + ".pcm"]
+    with open(src, "wb") as fh:
+        fh.write(data)
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error"] + args + [out_path], check=True)
+    finally:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+
+
+def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> str:
+    """用 Google Gemini TTS 合成（比 edge-tts 更像真人，且能演出「商業大佬」口吻）。
+
+    為什麼要換引擎（2026-09-26 使用者：「不要，我要更像真人，那種商業大佬的感覺」）：
+    edge-tts 的合成腔到頂就是那樣，換聲音名救不了。
+
+    ⚠️ Gemini 會把 prompt 整段唸出來，所以風格指示**必須**寫成分節標題的形式：
+
+        # 風格指示
+        <風格描述>
+        # 台詞
+        <真正要唸的字>
+
+    實測：台詞 26 字 → 5.3s（正確，只唸台詞）；若寫成「請用…口吻說出：<台詞>」
+    會被連指示一起唸成 14.1s。所以別改成自然語言開頭。
+
+    免費層**每個 model 每天只有 10 次**配額 → 依序輪替 gemini_model /
+    gemini_model_fallbacks，任一成功即用；全失敗才由 speak() 退回 edge-tts。
+    """
+    import base64
+    import json as _json
+    import urllib.request
+
+    key = _gemini_api_key(cfg)
+    if not key:
+        raise RuntimeError("找不到 Gemini API key（tts.gemini_api_key_env / .env）")
+
+    style = (getattr(cfg.tts, "gemini_style", "") or "").strip()
+    prompt = f"# 風格指示\n{style}\n# 台詞\n{text}" if style else text
+    voice = getattr(cfg.tts, "voice", "") or "Charon"
+    timeout = float(getattr(cfg.tts, "gemini_timeout_sec", 60) or 60)
+    models = [getattr(cfg.tts, "gemini_model", "")] + list(
+        getattr(cfg.tts, "gemini_model_fallbacks", []) or []
+    )
+    last_err: Optional[Exception] = None
+    for model in [m for m in models if m]:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={key}")
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+            },
+        }
+        req = urllib.request.Request(
+            url, data=_json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = _json.load(resp)
+            data = base64.b64decode(
+                payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            )
+        except Exception as exc:  # noqa: BLE001 - 換下一個 model（配額/網路/格式）
+            last_err = exc
+            continue
+        _gemini_write_audio(data, out_path)
+        if logger:
+            logger.info("TTS 合成（gemini %s，voice=%s，%d bytes）", model, voice, len(data))
+        return out_path
+    raise RuntimeError(f"Gemini TTS 全部 model 都失敗：{last_err}")
+
+
 def _mute_path(cfg: Config) -> str:
     return expand(getattr(cfg.tts, "mute_file", "") or "")
 
@@ -323,8 +431,17 @@ def speak(text: str, cfg: Config, logger=None) -> bool:
             logger.info("TTS 靜音中 → 跳過：%r", text)
         return False
     path = os.path.join(tempfile.gettempdir(), f"vd_tts_{os.getpid()}.mp3")
+    engine = (getattr(cfg.tts, "engine", "edge") or "edge").strip().lower()
     try:
-        synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+        if engine == "gemini":
+            try:
+                synth_gemini_to_file(text, path, cfg, logger=logger)
+            except Exception as exc:  # noqa: BLE001 - 退回 edge-tts，語音提示不該中斷流程
+                if logger:
+                    logger.warning("Gemini TTS 失敗（%s）→ 退回 edge-tts", exc)
+                synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+        else:
+            synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
     except Exception as exc:  # noqa: BLE001 - 網路/合成失敗都不該讓主流程崩潰
         if logger:
             logger.warning("TTS 合成失敗：%s", exc)

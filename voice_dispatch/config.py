@@ -207,7 +207,29 @@ class ConfirmConfig:
 
 @dataclass
 class TtsConfig:
+    # 合成引擎："edge"（edge-tts，免費快但合成腔明顯）／"gemini"（Gemini TTS，更像真人）。
+    engine: str = "edge"
+    # voice 兩引擎共用：engine="edge" 時是 edge 聲音名（zh-CN-XiaoxiaoNeural）；
+    # engine="gemini" 時是 Gemini prebuilt 聲音名（Charon／Orus／Alnilam／Algenib…）。
     voice: str = "zh-CN-XiaoyiNeural"
+    # ── engine="gemini" 專用（2026-09-26 使用者：「我要更像真人，那種商業大佬的感覺」）──
+    # 風格指示：**必須**用「# 風格指示 / # 台詞」分節寫進 prompt，模型才會只唸台詞
+    # （寫成「請用…口吻說出：」會被連指示一起唸出來，實測 5.3s → 14.1s）。
+    gemini_style: str = (
+        "你是一位五十歲的集團總裁，正在對全公司高層宣布決議。"
+        "聲音低沉、有壓場感、不疾不徐，語速從容，收尾果斷。"
+        "不要播報腔、不要活潑、不要上揚。"
+    )
+    # 免費層**每個 model 每天只有 10 次**配額 → 主 model 用完就依序換 fallback。
+    gemini_model: str = "gemini-3.1-flash-tts-preview"
+    gemini_model_fallbacks: List[str] = field(default_factory=lambda: [
+        "gemini-3.8-flash-tts",
+        "gemini-3.8-flash-lite-tts",
+        "gemini-2.5-flash-preview-tts",
+    ])
+    gemini_api_key_env: str = "GOOGLE_API_KEY"
+    gemini_env_file: str = "~/.hermes/.env"
+    gemini_timeout_sec: float = 60.0
     # 2026-09-25：文案改成「像在跟人講話」——短、口語、而且**每次重問換一句**，
     # 不要像機器人一樣重播同一句（使用者反饋「一直卡在問我需求」＋「不夠自然」）。
     # 再一輪（使用者：「好愛說廢話，說話快一點，不要重複我的內容」）：
@@ -250,6 +272,11 @@ class TtsConfig:
     speak_result_quiet_sec: float = 8.0
     # 盯串的輪詢間隔（越小越快發現新訊息，越吃 API 額度）。
     speak_result_poll_sec: float = 2.0
+    # relay 模式判斷「回合真的結束」用的 Hermes session DB。判斷依據（實測）：
+    #   回合結束 = 最後一則 role=assistant/finish_reason='stop' 的訊息
+    #              ＋緊接一筆 role=session_meta 收尾列。
+    # 只有看到新的 session_meta 才念最終回覆 → 絕不唸中間訊息、回合結束立刻出聲。
+    speak_result_session_db: str = "~/.hermes/state.db"
     # 咚咚＝「有質感的」雙音提示。
     # 兩次退貨記錄（2026-09-25）：
     #   1. 純正弦 + 衰減 → 「空洞的咚咚」

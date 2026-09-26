@@ -85,11 +85,28 @@ confirm:                  # 回述確認
   disagree_words: ["不", "錯", "重講", "再說", "重來", "no"]
 
 tts:
+  # 合成引擎："edge"＝edge-tts（免費、快，但合成腔明顯）；
+  #           "gemini"＝Google Gemini TTS（更像真人，可用風格指示演出「商業大佬」口吻；
+  #           免費層每 model 每天 10 次配額，會自動在多個 model 間輪替，全掛才退回 edge）。
+  engine: "edge"
+  # engine="edge" 時填 edge 聲音名；engine="gemini" 時填 Gemini prebuilt 聲音名。
   voice: "zh-CN-XiaoxiaoNeural"
-  # 其他不錯的：zh-TW-HsiaoChenNeural / zh-TW-YunJheNeural / zh-CN-YunyangNeural /
-  #             zh-CN-YunjianNeural / zh-CN-YunxiNeural（2026-09-26 使用者要「成熟點」，
-  #             樣本見 skill；XiaoyiNeural 是 Cartoon/Lively＝偏活潑幼，已換掉）
-  # 列出全部：edge-tts --list-voices | grep zh
+  # 列出 edge 全部聲音：edge-tts --list-voices | grep zh
+  # Gemini 常用低沉男聲：Charon / Orus / Alnilam / Algenib / Rasalgethi / Iapetus
+  # ── engine="gemini" 專用 ───────────────────────────────────────────
+  # 風格指示**必須**寫成這樣（# 風格指示 / # 台詞 分節），模型才會只唸台詞；
+  # 若改成「請用…口吻說出：<台詞>」會被連指示一起唸出來（實測 5.3s → 14.1s）。
+  gemini_style: |-
+    你是一位五十歲的集團總裁，正在對全公司高層宣布決議。聲音低沉、有壓場感、
+    不疾不徐，語速從容，收尾果斷。不要播報腔、不要活潑、不要上揚。
+  gemini_model: "gemini-3.1-flash-tts-preview"
+  gemini_model_fallbacks:
+    - "gemini-3.8-flash-tts"
+    - "gemini-3.8-flash-lite-tts"
+    - "gemini-2.5-flash-preview-tts"
+  gemini_api_key_env: "GOOGLE_API_KEY"      # 從 .env 這個變數名取 key
+  gemini_env_file: "~/.hermes/.env"
+  gemini_timeout_sec: 60.0
   ok_prompt: "OK，請說出你的需求。"
   confirm_template: "我理解成：{transcript}。對嗎？"
   unclear_prompt: "抱歉我沒聽清楚，請再說一次要或不要。"
