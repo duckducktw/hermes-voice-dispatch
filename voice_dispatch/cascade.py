@@ -94,7 +94,10 @@ class WakeCascade:
 
         if self._since >= self.window_blocks:
             if self._log:
-                self._log.info("hey 閘門觸發但窗內未見 hermes（轉錄 %r）→ 忽略",
-                               self.verifier.latest)
+                # 附上 (token, conf)：文字對但 conf 低 → 是門檻問題；文字不對 →
+                # 是變體集合/acoustic 問題。（2026-09-26 加，供 recall 調校診斷）
+                scored = getattr(self.verifier, "latest_scored", None)
+                self._log.info("hey 閘門觸發但窗內未見 hermes（轉錄 %r, tokens=%s）→ 忽略",
+                               self.verifier.latest, scored)
             self.reset()
         return None

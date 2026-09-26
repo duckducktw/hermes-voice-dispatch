@@ -298,6 +298,7 @@ class WakeVerifier:
         self._rec = self._new_recognizer()                # 全詞彙（不加 grammar）
         self._rec.SetWords(True)
         self.latest = ""
+        self.latest_scored: list = []                     # 診斷用：(token, conf) 清單
         if logger:
             logger.info(
                 "喚醒確認器：vosk 全詞彙（前綴 %s / 變體 %s，信心度門檻 %.2f）",
@@ -312,6 +313,7 @@ class WakeVerifier:
         self._rec = self._new_recognizer()
         self._rec.SetWords(True)
         self.latest = ""
+        self.latest_scored = []
 
     def verify(self, samples) -> bool:
         """整段辨識後套 bigram 規則；命中回 True。清空辨識器狀態，可重複呼叫。"""
@@ -324,6 +326,9 @@ class WakeVerifier:
         result = data.get("result") or []
         tokens = [str(w.get("word", "")).lower() for w in result]
         confs = [float(w.get("conf", 0.0)) for w in result]
+        # 診斷用（2026-09-26）：講了 hey hermes 卻沒醒時，log 要能一眼看出是被
+        # 變體集合否決（文字不對）還是被 verify_min_conf 擋掉（文字對、conf 太低）。
+        self.latest_scored = list(zip(tokens, confs))
         return match_wake_variants(tokens, confs, self.prefixes, self.variants,
                                    self.min_conf) is not None
 

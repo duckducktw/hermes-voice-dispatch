@@ -60,7 +60,7 @@ wake:
   verify_interval_sec: 0.15  # 收訊期間試判間隔（越小越早醒、越吃 CPU）
   verify_prefixes: [hey, hay, a, the, he, ok, okay, hi]
   verify_variants: [hermes, homes, hums, hermis, hermes's]
-  verify_min_conf: 0.5    # 全詞彙 per-word 信心度門檻
+  verify_min_conf: 0.3    # 全詞彙 per-word 信心度門檻（否決力來自 variants 集合，見 config.py 註解）
   # ── mode="clap"（舊路徑）才用 ──────────────────────────────
   window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
   cooldown_sec: 10.0      # 喚醒詞沒過之後的冷卻秒數

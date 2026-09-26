@@ -136,7 +136,15 @@ class WakeConfig:
     verify_variants: List[str] = field(default_factory=lambda: [
         "hermes", "homes", "hums", "hermis", "hermès", "hermes's",
     ])
-    verify_min_conf: float = 0.5       # 全詞彙 per-word 信心度門檻（實測 0.5 夠）
+    # 2026-09-26 由 0.5 降到 0.3（使用者「一直無法呼叫到語音助手」的實證修正）：
+    #   當天 log 出現「確認轉錄 'hey hermes hey'」卻被否決 → 文字已經對了，是被這個
+    #   confidence 門檻擋掉（受限詞彙/遠場收音時，正確的 hermes 常只有 0.3~0.45）。
+    #   **否決力其實來自 `verify_variants` 集合本身，不是這個門檻**：微評測 44 句
+    #   （正樣本 12／危險負樣本 44，含 hey hermit / her mess / Hey her mouse / hay her mess…）
+    #   在 0.5 / 0.35 / 0.3 / 0.0 四段門檻下 **FP 都是 0/44**（唯一漏判是印度口音
+    #   被全詞彙聽成 'he hands'，那是文字層問題、降門檻救不到）。
+    #   → 降門檻純賺 recall、量測不到 FP 代價。要更保守就把它加回 0.5。
+    verify_min_conf: float = 0.3       # 全詞彙 per-word 信心度門檻
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0
