@@ -164,14 +164,16 @@ discord:
   guild_id: "1340241728959025236"
   auto_archive_duration: 1440          # thread 自動封存（分鐘）
   thread_name_limit: 100               # Discord thread 名長度上限
-  card_template: |-
-    **🎙️ 語音任務**
-    > {transcript}
-
-    `{date}`
-  thread_name_template: "🎙️ {short}"
+  # 母頻道那一則（同時是討論串開頭）＝需求原文本身。預設只留需求那段、不加標題／
+  # emoji／時間（2026-09-26 使用者：「只留需求那段」「語音任務不用特地說」）。
+  card_template: "{transcript}"
+  # 自動把使用者加入討論串（語音派工的串是 bot 開的，他預設不在成員名單、
+  # 收不到通知）。填 Discord user id；空字串＝不加入。
+  user_id: ""
+  # 討論串名稱：直接用需求前幾字。
+  thread_name_template: "{short}"
   thread_short_len: 40
-  # 串內再補一則任務卡（**留空＝不發**；預設不發，需求已併入 card_template）。
+  # 串內再補一則任務卡（**留空＝不發**）。
   task_card_template: ""
   # 派工通知（**留空＝不發**；gateway 接手後自己會回，這則是多餘的）。
   dispatched_notice: ""
@@ -195,3 +197,16 @@ dispatch:
     2. 執行過程中把重要進度發到串內（不要沉默太久）。
     3. 若中途需要使用者確認，就在串內發問並停下來等；使用者會直接在串內回覆你。
     4. 完成後把結果發到串內，包含你實際做了什麼、怎麼驗證的。若失敗也要回報失敗原因。
+
+relay:
+  # 把語音需求當成「一則 @Hermes 的使用者訊息」送進討論串 → gateway 用它原本那條路
+  # 處理（同一條 session、typing、逐字串流、後續追問接續＝跟打字完全一樣）。
+  # 前提：gateway 的 ~/.hermes/.env 要有 DISCORD_ALLOW_BOTS=mentions，且
+  # streaming.enabled=true。webhook URL（含 token）存在 .env 的
+  # DISCORD_RELAY_WEBHOOK_URL；不填＝停用，回退 spawn `hermes -z`。
+  enabled: true
+  mention_id: "1520796555580543138"   # gateway bot 的 user id（要 @ 它才會被收）
+  # 發話顯示名稱：留空＝**模仿 Hermes bot 自己**（daemon 用 GET /users/@me 取名字＋
+  # 頭像）。要固定字串就在這裡填。
+  username: ""
+  timeout_sec: 20.0

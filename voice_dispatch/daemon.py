@@ -24,7 +24,7 @@ import numpy as np
 
 from . import audio, cascade, dispatch, kws, stt, tts, wake
 from .config import Config
-from .discord_api import DiscordClient
+from .discord_api import DiscordClient, user_avatar_url
 from .text import classify_confirmation, make_thread_name, normalize, spoken_summary
 from .vad import VadSegmenter, VadState
 
@@ -591,6 +591,70 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R5 + R6：轉發 Discord + 派工
     # ------------------------------------------------------------------
+    def _add_thread_member(self, client, thread_id: str) -> None:
+        """把使用者加入討論串（2026-09-26 使用者：「自動把我加到串裏面」）。
+
+        語音派工的討論串是 bot 開的，使用者預設不在成員名單裡、收不到通知；
+        建立後補一發 PUT thread-members 把他加進去。
+
+        **非致命**：沒設 user_id、或權限不足／42000 之類的失敗，只記 warning，
+        不影響派工（討論串本身仍然有效）。
+        """
+        uid = str(getattr(self.cfg.discord, "user_id", "") or "").strip()
+        if not uid:
+            return
+        try:
+            client.add_thread_member(thread_id, uid)
+            log.info("已把使用者 %s 加入討論串 %s", uid, thread_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("加入討論串成員失敗（非致命，略過）：%s", exc)
+
+    def _bot_identity(self, client) -> dict:
+        """要模仿的發話身分＝Hermes bot 自己（`GET /users/@me`），只抓一次。
+
+        2026-09-26 使用者：「要模仿 bot 在伺服器的外觀」——webhook 訊息顯示的是
+        發話者的名稱＋頭像，直接沿用 bot 自己的，看起來就跟 bot 發的一樣。
+        抓不到就回空 dict（退回設定裡的 `relay.username`）。
+        """
+        cached = getattr(self, "_bot_identity_cache", None)
+        if cached is not None:
+            return cached
+        ident: dict = {}
+        try:
+            me = client.get_self()
+            ident = {
+                "username": str(me.get("username") or ""),
+                "avatar_url": user_avatar_url(me),
+            }
+            log.info("relay 將模仿 bot 身分：%s", ident.get("username") or "(讀不到名稱)")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("讀取 bot 身分失敗（%s）→ 改用 relay.username", exc)
+        self._bot_identity_cache = ident
+        return ident
+
+    def _await_thread(self, client, message_id: str, timeout_sec: float = 8.0) -> str:
+        """等 gateway 把那則訊息變成討論串（`force_thread_channels`），回傳 thread id。
+
+        輪詢 `GET /channels/{ch}/messages/{mid}` 的 `thread` 欄位。由訊息長出來的
+        討論串 **thread id == message id**，所以一掛上就知道。等不到回 **空字串**
+        （呼叫端會當成 relay 失敗 → 回退 spawn）；8 秒是刻意留的餘裕：實測 gateway
+        開串只要 0.3 秒，等不到通常就是「gateway 根本沒接手」（例如 @ 閘沒過）。
+        """
+        deadline = time.time() + max(0.0, timeout_sec)
+        channel_id = self.cfg.discord.channel_id
+        while time.time() < deadline:
+            try:
+                m = client.get_message(channel_id, message_id)
+                tid = str(((m.get("thread") or {}) or {}).get("id") or "")
+                if tid:
+                    return tid
+            except Exception as exc:  # noqa: BLE001
+                log.warning("輪詢討論串失敗（%s）", exc)
+            time.sleep(0.5)
+        log.warning("等不到 gateway 掛上討論串（訊息 %s）→ 當 relay 失敗，回退 spawn",
+                    message_id)
+        return ""
+
     def forward_and_dispatch(self, transcript: str) -> None:
         """把需求轉發到 Discord、開 thread、派工 hermes 並回報。"""
         now = datetime.now()
@@ -615,19 +679,71 @@ class VoiceDispatcher:
         client = DiscordClient(self.cfg, logger=log)
         channel_id = self.cfg.discord.channel_id
 
-        log.info("發送語音派工卡到主頻道 %s", channel_id)
-        msg = client.post_message(channel_id, card)
-        message_id = str(msg.get("id", ""))
-        if not message_id:
-            raise RuntimeError(f"Discord 未回傳 message id：{msg}")
+        relay = getattr(self.cfg, "relay", None)
+        use_relay = bool(
+            relay and getattr(relay, "enabled", False) and getattr(self.cfg, "relay_url", "")
+        )
+        thread_id = ""      # 兩條路徑都會設；先給值讓靜態檢查與例外路徑都安全
+        message_id = ""
 
-        log.info("建立討論串：%s", thread_name)
-        thread = client.create_thread_from_message(channel_id, message_id, thread_name)
-        thread_id = str(thread.get("id", ""))
-        if not thread_id:
-            raise RuntimeError(f"Discord 未回傳 thread id：{thread}")
+        # 2026-09-26 定案：「能直接用 webhook 發嗎？節省一則訊息，而且要模仿 bot 在
+        # 伺服器的外觀」。實測發現 gateway 的 `force_thread_channels` 對 #人工智障 的
+        # 訊息**強制開串** → 只要 webhook 在母頻道發一則「<@Hermes> 需求原文」，
+        # gateway 就會自己把它變成討論串的開頭並在串內處理（session key = thread id
+        # == message id）。所以不必自己發卡、也不必再補一則串內觸發訊息：全場只有
+        # 這一則，需求只出現一次、外面看得到。
+        if use_relay:
+            try:
+                ident = self._bot_identity(client)
+                sent = dispatch.post_relay(
+                    transcript, self.cfg, logger=log, identity=ident
+                )
+                message_id = str(sent.get("id", ""))
+                if not message_id:
+                    raise RuntimeError(f"relay 未回傳 message id：{sent}")
+                thread_id = str(((sent.get("thread") or {}) or {}).get("id") or "")
+                if not thread_id:      # gateway 開串要一點時間 → 輪詢
+                    thread_id = self._await_thread(client, message_id)
+                if not thread_id:
+                    raise RuntimeError(
+                        f"gateway 沒把訊息 {message_id} 開成討論串"
+                        "（relay.mention_id 留空但 .env 的 DISCORD_ALLOW_BOTS 還是 mentions？）")
+                log.info(
+                    "需求已由 webhook 發在母頻道（msg=%s）；gateway 討論串 %s",
+                    message_id, thread_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("relay 路徑失敗：%s → 回退 spawn hermes（自行開串）", exc)
+                # 把已經發出去、但沒人接手的訊息收回來，免得母頻道留一則孤兒。
+                if message_id:
+                    try:
+                        client.delete_message(channel_id, message_id)
+                        log.info("已刪掉沒人接手的 relay 訊息 %s", message_id)
+                    except Exception as inner:  # noqa: BLE001
+                        log.warning("刪除 relay 訊息失敗（非致命）：%s", inner)
+                    message_id = ""
+                use_relay = False
 
-        # 串內任務卡：**留空＝不發**（2026-09-26 使用者：「幾則就好」→ 已併入串首訊息）。
+        if not use_relay:
+            # 回退路徑：relay 停用或失敗才走這裡——bot 發卡 → 由該訊息長出討論串。
+            log.info("發送需求到主頻道 %s（回退路徑：自行開串）", channel_id)
+            msg = client.post_message(channel_id, card)
+            message_id = str(msg.get("id", ""))
+            if not message_id:
+                raise RuntimeError(f"Discord 未回傳 message id：{msg}")
+            log.info("建立討論串：%s", thread_name)
+            thread = client.create_thread_from_message(
+                channel_id, message_id, thread_name
+            )
+            thread_id = str(thread.get("id", ""))
+            if not thread_id:
+                raise RuntimeError(f"Discord 未回傳 thread id：{thread}")
+
+        # 把使用者加進討論串（讓他收到通知、可以直接在串內回話）。
+        # relay 路徑的串是 **gateway 開的**，他一定不在成員名單裡；回退路徑同理。
+        self._add_thread_member(client, thread_id)
+
+        # 串內任務卡：**留空＝不發**（2026-09-26 使用者：「幾則就好」）。
         if task_card.strip():
             client.post_thread_message(thread_id, task_card)
 
@@ -790,7 +906,15 @@ class VoiceDispatcher:
 
             def _thread_watch():
                 """備援：舊的「等安靜 quiet 秒 → 唸串內最後一則 agent 訊息」。"""
-                c = DiscordClient(self.cfg, logger=log)
+                # 建構就可能失敗（沒 token／設定缺）→ 不能讓它把背景執行緒炸掉
+                # （實測：這會變成未捕捉的背景例外，只在 log 裡留一串 traceback）。
+                try:
+                    c = DiscordClient(self.cfg, logger=log)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("讀串備援路徑無法連 Discord（%s）→ 放棄語音回報", exc)
+                    return
+                if self._stop:
+                    return
                 last_seen = ""
                 last_change = time.time()
                 bot_id = str(getattr(self.cfg.relay, "mention_id", ""))
@@ -824,28 +948,19 @@ class VoiceDispatcher:
 
             _th.Thread(target=_loop, daemon=True).start()
 
-        # ── 派工：把需求當成「一則 @Hermes 的訊息」發進討論串 → gateway 用它原本那條路──
-        #    （同一條 session、typing、逐字串流、後續追問接續＝跟打字完全一樣）
-        #    relay URL 缺失或送出失敗 → 回退舊的 spawn `hermes -z`。
-        relay = getattr(self.cfg, "relay", None)
-        use_relay = bool(
-            relay and getattr(relay, "enabled", False) and getattr(self.cfg, "relay_url", "")
-        )
+        # ── 派工方式 ──────────────────────────────────────────────────
+        #   relay（預設）：需求那一則**已經**在上方由 webhook 發到母頻道，gateway 自己
+        #     開串接手 → 這裡只要開始盯結果（讀 session DB → 念最終回覆）。
+        #   spawn（回退）：relay 停用或失敗時，才由我們自己 spawn `hermes -z`。
         if use_relay:
-            try:
-                dispatch.post_relay(transcript, thread_id, self.cfg, logger=log)
-                _watch_thread_for_result()
-            except Exception as exc:  # noqa: BLE001
-                log.error("relay 送出失敗：%s → 回退 spawn hermes", exc)
-                use_relay = False
-            else:
-                # 派工通知：留空＝不發（gateway 接手後自己會回一則，這則是多餘的）。
-                if self.cfg.discord.dispatched_notice.strip():
-                    client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
-                if self.cfg.tts.prompt_mode != "chime":
-                    tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
-                log.info("relay 派工完成（gateway 接手），thread=%s", thread_id)
-                return
+            # 派工通知：留空＝不發（gateway 接手後自己會回一則，這則是多餘的）。
+            if self.cfg.discord.dispatched_notice.strip():
+                client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
+            if self.cfg.tts.prompt_mode != "chime":
+                tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
+            _watch_thread_for_result()
+            log.info("relay 派工完成（gateway 接手），thread=%s", thread_id)
+            return
 
         try:
             dispatch.spawn_hermes(
@@ -874,21 +989,28 @@ class VoiceDispatcher:
             transcript, self.cfg.discord.channel_id, "<thread_id>", self.cfg
         )
         argv = dispatch.build_hermes_command(prompt, self.cfg)
+        # dry-run 不載入 .env，所以拿不到 relay_url；這裡跟下方「派工方式」一致，
+        # 只看 relay.enabled。
+        relay_on = bool(getattr(self.cfg.relay, "enabled", False))
         lines = [
             "",
             "===== DRY RUN（不會真的發送 Discord 或 spawn hermes）=====",
-            f"[目標主頻道] {self.cfg.discord.channel_id}",
-            f"[語音派工卡] {card}",
-            f"[討論串名稱] {thread_name}（長度 {len(thread_name)}）",
-            "[討論串任務卡]",
-            task_card,
+            f"[目標母頻道] {self.cfg.discord.channel_id}",
             "[派工方式]",
-            (f"  relay → 在討論串發「<@{self.cfg.relay.mention_id}> 需求原文」"
-             "（gateway 當一般訊息處理＝跟打字一樣；webhook URL 讀 .env，"
-             "dry-run 不載入 secrets）"
-             if getattr(self.cfg.relay, "enabled", False)
-             else f"  spawn（relay 停用）：{argv[0]} {argv[1]} <dispatch_prompt>"),
-            "[dispatch_prompt 內容]",
+            (f"  relay（全場 1 則）：webhook 直接在母頻道發\n"
+             f"    「{dispatch.build_relay_content(transcript, self.cfg)}」\n"
+             "    （模仿 bot 的名字＋頭像。gateway 的 force_thread_channels 會自己替它"
+             "開討論串\n     並在串內處理 → 需求只出現一次、外面看得到）\n"
+             "    webhook URL 讀 .env，dry-run 不載入 secrets"
+             if relay_on
+             else "  spawn（relay 停用／失敗的回退路徑）：\n"
+                  f"    母頻道卡「{card}」→ 自行開討論串「{thread_name}」→\n"
+                  f"    {argv[0]} {argv[1]} <dispatch_prompt>"),
+            "[加入討論串成員] user_id="
+            f"{getattr(self.cfg.discord, 'user_id', '') or '（未設定，不加入）'}",
+            "[串內任務卡／派工完成通知] "
+            f"{task_card.strip() or self.cfg.discord.dispatched_notice.strip() or '（留空＝不發）'}",
+            "[dispatch_prompt 內容（只有回退 spawn 路徑會用到）]",
             prompt,
             "==========================================================",
             "",

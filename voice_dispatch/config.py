@@ -370,16 +370,20 @@ class DiscordConfig:
     guild_id: str = "1340241728959025236"
     auto_archive_duration: int = 1440          # thread 自動封存（分鐘）
     thread_name_limit: int = 100               # Discord thread 名長度上限
-    # 串首訊息（＝發在母頻道、也是討論串起點的那一則）：一則就把需求講清楚。
-    # 2026-09-26 使用者：「對話記錄不要這麼多訊息，幾則就好」→ 合併原本的
-    # card + task_card 兩則為一則（原本一輪語音會留 5 則訊息，現在 3 則）。
-    card_template: str = (
-        "**🎙️ 語音任務**\n"
-        "> {transcript}\n"
-        "\n"
-        "`{date}`"
-    )
-    thread_name_template: str = "🎙️ {short}"
+    # 串首訊息（＝發在母頻道、同時是討論串起點那一則）。
+    # 2026-09-26 使用者定案：「只留需求那段」「語音任務不用特地說」→ **就是需求原文
+    # 本身**，不加標題、不加 emoji、不加時間（外面看起來跟打字下的任務一樣）。
+    # 這則同時是討論串開頭（thread_id == message_id），gateway 開 session 會把它帶進
+    # 上下文，所以需求的完整原文全場只出現一次（串內 relay 只送指向句，見 relay.mode）。
+    card_template: str = "{transcript}"
+    # 自動把使用者加入討論串（2026-09-26 使用者：「自動把我加到串裏面」）。
+    # 語音派工的討論串是 bot 開的（不是由使用者自己的訊息長出來的），所以他預設
+    # 不在成員名單裡、收不到通知。建立後用
+    #   PUT /channels/{thread}/thread-members/{user_id}
+    # 把他加進去。空字串＝不加入。填 Discord user id。
+    user_id: str = ""
+    # 討論串名稱：直接用需求前幾字（同一天要求：不做自動化痕跡，不加「🎙️」）。
+    thread_name_template: str = "{short}"
     thread_short_len: int = 40                 # thread 名取轉錄前幾字
     # 串內再補一則任務卡（**留空＝不發**；預設不發，避免洗版）。
     task_card_template: str = ""
@@ -446,8 +450,10 @@ class RelayConfig:
     url_env: str = "DISCORD_RELAY_WEBHOOK_URL"
     # gateway bot 的 user id：訊息內容要 @ 它，gateway 才會收（ALLOW_BOTS=mentions）。
     mention_id: str = "1520796555580543138"
-    # webhook 發話時顯示的名稱（讓串內看得出這是語音進來的）。
-    username: str = "🎙️ 語音輸入"
+    # webhook 發話時顯示的名稱。**留空＝模仿 Hermes bot 自己**（daemon 用
+    # `GET /users/@me` 取 bot 的名字＋頭像；2026-09-26 使用者：「要模仿 bot 在伺服器
+    # 的外觀」）。填了就用填的字串，但頭像仍會用 bot 的。
+    username: str = ""
     timeout_sec: float = 20.0
 
 

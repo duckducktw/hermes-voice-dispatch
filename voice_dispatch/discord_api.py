@@ -13,6 +13,16 @@ from typing import Any, Dict, Optional
 from .config import Config
 
 
+def user_avatar_url(user: Dict[str, Any]) -> str:
+    """把使用者物件的頭像轉成可直接給 webhook 用的 URL（沒有頭像就回空字串）。"""
+    uid = str((user or {}).get("id") or "")
+    h = str((user or {}).get("avatar") or "")
+    if not uid or not h:
+        return ""
+    ext = "gif" if h.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/avatars/{uid}/{h}.{ext}?size=128"
+
+
 class DiscordError(RuntimeError):
     """Discord API 呼叫失敗。"""
 
@@ -106,6 +116,31 @@ class DiscordClient:
             f"/channels/{channel_id}/messages/{message_id}/threads",
             payload,
         )
+
+    def add_thread_member(self, thread_id: str, user_id: str) -> Dict[str, Any]:
+        """把使用者加入 thread（讓他收到通知、能直接在串內回話）。
+
+        `PUT /channels/{thread}/thread-members/{user}`；成功回 204（無 body）。
+        """
+        return self._request(
+            "PUT", f"/channels/{thread_id}/thread-members/{user_id}"
+        )
+
+    def get_self(self) -> Dict[str, Any]:
+        """讀自己的使用者物件（`GET /users/@me`）。
+
+        用途：relay 的 webhook 訊息要「模仿 bot 在伺服器的外觀」（2026-09-26 使用者
+        要求），所以取名稱與頭像（`user_avatar_url()` 轉成 URL）。
+        """
+        return self._request("GET", "/users/@me")
+
+    def get_message(self, channel_id: str, message_id: str) -> Dict[str, Any]:
+        """讀單一訊息（用來等 gateway 把某則訊息變成討論串：看 `thread` 欄位）。"""
+        return self._request("GET", f"/channels/{channel_id}/messages/{message_id}")
+
+    def delete_message(self, channel_id: str, message_id: str) -> Dict[str, Any]:
+        """刪訊息（relay 發出去卻沒人接手時，把它收回來避免留孤兒）。"""
+        return self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
 
     def post_thread_message(self, thread_id: str, content: str) -> Dict[str, Any]:
         """發訊息到 thread（thread 本身也是一個 channel）。"""

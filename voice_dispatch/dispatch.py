@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from .config import Config
 
@@ -118,21 +118,56 @@ def extract_stdout(log_file: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Relay 派工：把語音需求當成「一則 @Hermes 的使用者訊息」丟進討論串
+# Relay 派工：把語音需求當成「一則 @Hermes 的使用者訊息」**直接發在母頻道**
 # ---------------------------------------------------------------------------
 def build_relay_content(transcript: str, cfg: Config) -> str:
-    """組出 relay 訊息內容：`<@gateway_bot> 需求原文`。
+    """組出 relay 訊息內容。
 
-    一定要 @ gateway bot——gateway 的 `DISCORD_ALLOW_BOTS=mentions` 只接受
-    「@提及 Hermes 的 bot 訊息」（Hermes 官方給 relay/webhook bot 的入口）。
+    有 `relay.mention_id` 時＝`<@gateway_bot> 需求原文`；**留空＝純需求原文（完全不帶 @）**。
+
+    為什麼要 @：gateway 的 `DISCORD_ALLOW_BOTS=mentions` 對 **bot 作者**另有一道閘
+    （`plugins/platforms/discord/adapter.py:1347`
+    `if allow_bots == "mentions" and not self._self_is_explicitly_mentioned(message): return False`），
+    只收「@提及 Hermes 的 bot 訊息」。`free_response_channels` 只讓**人類**免 @。
+
+    2026-09-26 使用者要求「能改成不 @嗎」→ 做法是 `.env` 把 `DISCORD_ALLOW_BOTS` 改成
+    非 `none`/`mentions` 的值（本機用 `all`；改了那道閘就不作用），然後把
+    `relay.mention_id` 留空。⚠️ 兩者要配套：只留空 mention 而 .env 未生效時，gateway
+    不會接手 → daemon 會等不到討論串而**回退 spawn**（仍會完成，但多一張卡）。
     """
-    return f"<@{cfg.relay.mention_id}> {transcript}"
+    mid = str(getattr(cfg.relay, "mention_id", "") or "").strip()
+    return f"<@{mid}> {transcript}" if mid else transcript
 
 
-def post_relay(transcript: str, thread_id: str, cfg: Config, logger=None) -> dict:
-    """用 Discord webhook 把需求發進討論串，讓 gateway 當一般訊息處理。
+def build_relay_payload(
+    transcript: str, cfg: Config, identity: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """組 webhook POST 的 body。
 
-    成功回傳 Discord 的訊息 JSON（wait=true）。失敗會 raise，讓呼叫端回退 spawn。
+    `identity`＝要模仿的發話身分 `{"username": …, "avatar_url": …}`。使用者要求
+    「模仿 bot 在伺服器的外觀」，所以 daemon 會先用 `GET /users/@me` 取 Hermes bot
+    自己的名字＋頭像傳進來；沒給就退回設定裡的 `relay.username`。
+    """
+    payload: Dict[str, Any] = {"content": build_relay_content(transcript, cfg)}
+    ident = identity or {}
+    username = str(ident.get("username") or cfg.relay.username or "").strip()
+    if username:
+        payload["username"] = username
+    avatar = str(ident.get("avatar_url") or "").strip()
+    if avatar:
+        payload["avatar_url"] = avatar
+    return payload
+
+
+def post_relay(
+    transcript: str, cfg: Config, logger=None,
+    identity: Optional[Dict[str, str]] = None,
+) -> dict:
+    """用 Discord webhook 把需求直接發在**母頻道**（不帶 thread_id＝發在頻道本身）。
+
+    gateway 會（因 `force_thread_channels`）自己把這則變成討論串的開頭並在串內回覆。
+    成功回傳 Discord 的訊息 JSON（wait=true；含 id，可能已帶 `thread`）。失敗會
+    raise，讓呼叫端回退 spawn。
     """
     import json
     import urllib.error
@@ -143,9 +178,8 @@ def post_relay(transcript: str, thread_id: str, cfg: Config, logger=None) -> dic
         raise RuntimeError("relay url 為空（.env 沒有 DISCORD_RELAY_WEBHOOK_URL）")
 
     sep = "&" if "?" in url else "?"
-    target = f"{url}{sep}thread_id={thread_id}&wait=true"
-    payload = {"content": build_relay_content(transcript, cfg),
-               "username": cfg.relay.username}
+    target = f"{url}{sep}wait=true"
+    payload = build_relay_payload(transcript, cfg, identity)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         target, data=body, method="POST",
