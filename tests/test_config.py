@@ -21,6 +21,28 @@ def test_defaults():
     assert "hermes" in cfg.wake.keywords
     assert cfg.discord.auto_archive_duration == 1440
     assert cfg.discord.thread_name_limit == 100
+    assert cfg.wake.mode == "kws"
+    assert cfg.wake.oww_threshold == 0.6
+    assert cfg.wake.oww_confirmation_frames == 3
+
+
+def test_openwakeword_yaml_override(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "wake:\n"
+        "  mode: openwakeword\n"
+        "  oww_model: /tmp/hey_hermes.onnx\n"
+        "  oww_threshold: 0.7\n"
+        "  oww_confirmation_frames: 4\n"
+        "  oww_vad_threshold: 0.25\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(p), load_token=False)
+    assert cfg.wake.mode == "openwakeword"
+    assert cfg.wake.oww_model == "/tmp/hey_hermes.onnx"
+    assert cfg.wake.oww_threshold == 0.7
+    assert cfg.wake.oww_confirmation_frames == 4
+    assert cfg.wake.oww_vad_threshold == 0.25
 
 
 def test_yaml_override(tmp_path):

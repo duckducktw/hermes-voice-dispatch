@@ -22,7 +22,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import audio, cascade, dispatch, kws, stt, tts, wake
+from . import audio, cascade, dispatch, kws, oww, stt, tts, wake
 from .config import Config
 from .discord_api import DiscordClient, user_avatar_url
 from .text import classify_confirmation, make_thread_name, normalize, spoken_summary
@@ -231,6 +231,60 @@ class VoiceDispatcher:
                     self._recover_audio()
         return False
 
+    def _wait_for_wake_oww(self) -> bool:
+        """用自訂 hey_hermes ONNX 模型監聽喚醒詞。
+
+        與既有 KWS 路徑相同：只持有一條 input stream、沿用半雙工靜音、串流凍結
+        偵測與恢復。模型/執行期不可用時，安全回退到既有的 KWS 路徑。
+        """
+        try:
+            wake_detect = oww.OwwSpotter(
+                self.cfg.wake.oww_model,
+                self.cfg.wake.oww_threshold,
+                self.cfg.wake.oww_confirmation_frames,
+                self.cfg.wake.oww_vad_threshold,
+                logger=log,
+            )
+        except oww.OwwUnavailable:
+            log.warning("openWakeWord 不可用，回退 wake.mode=kws 的既有串接引擎。")
+            return self._wait_for_wake_kws()
+
+        while not self._stop:
+            frozen = {"hit": False, "blocks": 0}
+            with audio.input_stream(self.cfg.audio) as stream:
+                self._log_stream_health(stream)
+                if self._stop:
+                    return False
+                blocks = audio.read_blocks_watched(
+                    stream, self.cfg.audio.blocksize,
+                    frozen_max_blocks=self.cfg.audio.frozen_max_blocks,
+                    on_frozen=self._frozen_cb(frozen),
+                )
+                muted = False
+                for block in blocks:
+                    if self._stop:
+                        return False
+                    if self._echo_muted():
+                        if not muted:
+                            muted = True
+                            log.debug("自己在出聲 → 暫停喚醒偵測（半雙工）")
+                        continue
+                    if muted:
+                        muted = False
+                        wake_detect.reset()
+                        log.debug("恢復喚醒偵測")
+                    if wake_detect.feed(block):
+                        log.info(
+                            "喚醒詞確認：hey hermes（openWakeWord score=%.2f）",
+                            wake_detect.latest_score,
+                        )
+                        return True
+                if frozen["hit"]:
+                    log.warning("擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",
+                                frozen["blocks"])
+                    self._recover_audio()
+        return False
+
     def wait_for_wake(self) -> bool:
         """監聽喚醒詞；喚醒成功回傳 True。
 
@@ -239,10 +293,14 @@ class VoiceDispatcher:
             詞彙、常開、可用 partial 即時觸發）→ 第二階段「hermes」確認（全詞彙
             解碼 + bigram 規則）。不需要拍手、不對喚醒詞做 STT。實測 664 句近似
             發音語料誤判 0/600、漏判 0/64，最大喚醒延遲 ~110ms。
+          - "openwakeword"：以本機已訓練的 hey_hermes ONNX 模型直接偵測；模型
+            不可用時會記 warning 並安全回退到既有 "kws"。
           - "clap"：舊做法（拍手兩下 → 錄一段 → STT 比對字串），只留作退路。
         """
         if self.cfg.wake.mode == "kws":
             return self._wait_for_wake_kws()
+        if self.cfg.wake.mode == "openwakeword":
+            return self._wait_for_wake_oww()
         return self._wait_for_wake_clap()
 
     def _wait_for_wake_clap(self) -> bool:

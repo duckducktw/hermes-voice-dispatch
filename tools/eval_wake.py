@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""評測喚醒詞的誤判（false positive）與漏判（false negative）。
+"""評測喚醒詞的誤判（false positive）、漏判（false negative）與延遲。
 
-拿 `tools/build_wake_corpus.py` 產的語料，用**真正的 `kws.VoskSpotter`** 跑，
-輸出混淆矩陣與逐句誤判清單，並支援「低功耗偵測 → 高模型確認」兩段式評測。
+拿 `tools/build_wake_corpus.py` 產的語料，評測 Vosk、openWakeWord 或既有串接式
+hey → hermes 路徑。輸出混淆矩陣、逐句誤判清單，以及相對語音結束的平均喚醒延遲。
 
 用法：
+    # 現行 baseline（保留相容的 --cascade）
+    python3 tools/eval_wake.py --corpus /tmp/wake_corpus --cascade \
+        --stage1-model ~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15
+
+    # openWakeWord 模型和門檻掃描
+    python3 tools/eval_wake.py --corpus /tmp/wake_corpus --engine oww \
+        --oww-threshold-sweep 0.3,0.5,0.6,0.7,0.8
+
     # 單一組設定
-    python3 tools/eval_wake.py --corpus /tmp/wake_corpus \
+    python3 tools/eval_wake.py --corpus /tmp/wake_corpus --engine vosk \
         --stage1-model ~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15 \
         --stage1-conf 0.9
 
@@ -36,6 +44,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from voice_dispatch import kws  # noqa: E402
 from voice_dispatch import cascade  # noqa: E402
+from voice_dispatch import oww  # noqa: E402
 from voice_dispatch.config import Config  # noqa: E402
 
 SR = 16000
@@ -94,6 +103,73 @@ def _run_cascade(corpus: Path, cfg: Config) -> dict:
     }
 
 
+def _run_oww(
+    corpus: Path,
+    model_path: str,
+    threshold: float,
+    confirmation_frames: int,
+    vad_threshold: float = 0.0,
+) -> dict:
+    """以 OwwSpotter 跑整個語料。每個 wav 都重置成獨立的一次喚醒嘗試。"""
+    rows = [
+        json.loads(line)
+        for line in (corpus / "labels.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    try:
+        det = oww.OwwSpotter(
+            model_path,
+            threshold,
+            confirmation_frames,
+            vad_threshold=vad_threshold,
+        )
+    except oww.OwwUnavailable as exc:
+        raise RuntimeError(f"openWakeWord 無法評測：{exc}") from exc
+
+    tp = fn = fp = tn = 0
+    fp_details = collections.Counter()
+    fn_details = collections.Counter()
+    lat = []
+    for row in rows:
+        samples = _load_wav(corpus / row["file"])
+        det.reset()
+        woke_at = None
+        # 尾端補一個 block；音檔最後不足 80ms 時也要讓 chunker 有機會完成一幀。
+        stream = np.concatenate([samples, np.zeros(BLOCK, dtype=np.float32)])
+        for i in range(0, len(stream), BLOCK):
+            block = stream[i:i + BLOCK]
+            if det.feed(block):
+                woke_at = i + len(block)
+                break
+        woke = woke_at is not None
+        if row["label"] == 1:
+            if woke:
+                tp += 1
+                lat.append((woke_at - _speech_end(samples)) / SR)
+            else:
+                fn += 1
+                fn_details[row["text"]] += 1
+        elif woke:
+            fp += 1
+            fp_details[row["text"]] += 1
+        else:
+            tn += 1
+    return {
+        "mode": "oww",
+        "threshold": threshold,
+        "confirmation_frames": confirmation_frames,
+        "vad_threshold": vad_threshold,
+        "tp": tp,
+        "fn": fn,
+        "fp": fp,
+        "tn": tn,
+        "fp_details": fp_details,
+        "fn_details": fn_details,
+        "n_pos": sum(1 for row in rows if row["label"] == 1),
+        "n_neg": sum(1 for row in rows if row["label"] == 0),
+        "lat": lat,
+    }
+
+
 def _load_wav(path: Path) -> np.ndarray:
     with wave.open(str(path)) as w:
         assert w.getframerate() == SR, f"{path} 非 {SR}Hz"
@@ -102,7 +178,13 @@ def _load_wav(path: Path) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def _eval_file(samples: np.ndarray, stage1: kws.VoskSpotter, stage2, window_blocks: int):
+def _eval_file(
+    samples: np.ndarray,
+    stage1: kws.VoskSpotter,
+    stage2,
+    window_blocks: int,
+    stage1_conf: float,
+):
     """回傳 (stage1 最高候選信心度, stage2 是否確認通過, stage2 累計秒數)。
 
     stage1 用 min_conf=0 建（呼叫端負責），這裡只要出現候選就記 conf。
@@ -113,6 +195,7 @@ def _eval_file(samples: np.ndarray, stage1: kws.VoskSpotter, stage2, window_bloc
     best_conf = None
     confirmed = None
     stage2_secs = 0.0
+    woke_at = None
     for i in range(0, len(samples), BLOCK):
         blk = samples[i:i + BLOCK]
         hit = stage1.feed(blk)
@@ -125,7 +208,12 @@ def _eval_file(samples: np.ndarray, stage1: kws.VoskSpotter, stage2, window_bloc
                 t0 = time.perf_counter()
                 confirmed = stage2.verify(window)
                 stage2_secs += time.perf_counter() - t0
-    return best_conf, confirmed, stage2_secs
+            if stage1.last_conf >= stage1_conf and (
+                stage2 is None or bool(confirmed)
+            ):
+                woke_at = i + len(blk)
+                break
+    return best_conf, confirmed, stage2_secs, woke_at
 
 
 def _run(corpus: Path, stage1_model: str, stage1_conf: float,
@@ -148,9 +236,14 @@ def _run(corpus: Path, stage1_model: str, stage1_conf: float,
     fn_details = collections.Counter()
     stage2_calls = 0
     stage2_secs = 0.0
+    lat = []
     for r in rows:
         samples = _load_wav(corpus / r["file"])
-        best_conf, confirmed, s2 = _eval_file(samples, stage1, stage2, window_blocks)
+        # Vosk 的 final result 有時需等尾端靜音才吐出，模擬常開串流補 0.5 秒。
+        stream = np.concatenate([samples, np.zeros(int(0.5 * SR), dtype=np.float32)])
+        best_conf, confirmed, s2, woke_at = _eval_file(
+            stream, stage1, stage2, window_blocks, stage1_conf
+        )
         if confirmed is not None:
             stage2_calls += 1
             stage2_secs += s2
@@ -160,6 +253,8 @@ def _run(corpus: Path, stage1_model: str, stage1_conf: float,
         if r["label"] == 1:
             if woke:
                 tp += 1
+                if woke_at is not None:
+                    lat.append((woke_at - _speech_end(samples)) / SR)
             else:
                 fn += 1
                 fn_details[r["text"]] += 1
@@ -177,23 +272,35 @@ def _run(corpus: Path, stage1_model: str, stage1_conf: float,
         "n_neg": sum(1 for r in rows if r["label"] == 0),
         "stage2_calls": stage2_calls,
         "stage2_avg_ms": (stage2_secs / stage2_calls * 1000) if stage2_calls else 0.0,
+        "lat": lat,
     }
 
 
 def _print(result: dict, verbose: bool = True) -> None:
     n_pos, n_neg = result["n_pos"], result["n_neg"]
     fp, fn = result["fp"], result["fn"]
-    if result.get("mode") == "cascade":
+    if result.get("mode") in {"cascade", "oww"}:
         lat = result.get("lat") or []
+        average = sum(lat) / len(lat) if lat else 0.0
         med = sorted(lat)[len(lat) // 2] if lat else 0.0
-        print(f"\n[串接 hey→hermes]  正樣本 {n_pos} / 負樣本 {n_neg}")
+        if result["mode"] == "cascade":
+            tag = "串接 hey→hermes"
+        else:
+            tag = (
+                "openWakeWord "
+                f"threshold={result['threshold']:.2f} "
+                f"confirm={result['confirmation_frames']} "
+                f"vad={result['vad_threshold']:.2f}"
+            )
+        print(f"\n[{tag}]  正樣本 {n_pos} / 負樣本 {n_neg}")
         print(f"  喚醒成功 TP={result['tp']:3d}  漏判 FN={fn:3d} (漏判率 {fn/n_pos:.1%})")
         print(f"  誤判   FP={fp:3d}  正確略過 TN={result['tn']:3d} (誤判率 {fp/n_neg:.1%})")
         if lat:
-            print(f"  喚醒延遲（相對語音結束）：中位數 {med*1000:.0f} ms"
+            print(f"  平均喚醒延遲（相對語音結束）：{average*1000:.0f} ms"
+                  f"；中位數 {med*1000:.0f} ms"
                   f"（min {min(lat)*1000:.0f} / max {max(lat)*1000:.0f} ms）")
         else:
-            print("  喚醒延遲：（無樣本）")
+            print("  平均喚醒延遲：（無樣本）")
         if verbose and result["fp_details"]:
             print("  誤判來源 top：")
             for t, c in result["fp_details"].most_common(12):
@@ -209,6 +316,11 @@ def _print(result: dict, verbose: bool = True) -> None:
     print(f"\n[{tag}]  正樣本 {n_pos} / 負樣本 {n_neg}")
     print(f"  喚醒成功 TP={result['tp']:3d}  漏判 FN={fn:3d} (漏判率 {fn/n_pos:.1%})")
     print(f"  誤判   FP={fp:3d}  正確略過 TN={result['tn']:3d} (誤判率 {fp/n_neg:.1%})")
+    lat = result.get("lat") or []
+    if lat:
+        print(f"  平均喚醒延遲（相對語音結束）：{sum(lat) / len(lat) * 1000:.0f} ms")
+    else:
+        print("  平均喚醒延遲：（無樣本）")
     if result["stage2"]:
         print(f"  stage2：呼叫 {result['stage2_calls']} 次，平均 {result['stage2_avg_ms']:.0f} ms/次")
     if verbose and result["fp_details"]:
@@ -225,6 +337,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--corpus", default="/tmp/wake_corpus")
+    ap.add_argument("--engine", choices=("vosk", "oww", "cascade"), default="vosk",
+                    help="要評測的引擎（預設 vosk；--cascade 仍保留相容）")
     ap.add_argument("--stage1-model",
                     default="~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15")
     ap.add_argument("--stage1-words", default=None,
@@ -248,6 +362,13 @@ def main() -> None:
                     help="閘門只用定案結果（不用 partial）")
     ap.add_argument("--cascade", action="store_true",
                     help="評測串接式（hey 閘門→hermes 確認）並量喚醒延遲")
+    ap.add_argument("--oww-model",
+                    default="~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx")
+    ap.add_argument("--oww-threshold", type=float, default=0.6)
+    ap.add_argument("--oww-confirmation-frames", type=int, default=3)
+    ap.add_argument("--oww-vad-threshold", type=float, default=0.0)
+    ap.add_argument("--oww-threshold-sweep", default=None,
+                    help="逗號分隔的 openWakeWord 門檻清單，逐一評估")
     ap.add_argument("--quiet", action="store_true", help="只印矩陣，不印誤判來源")
     args = ap.parse_args()
 
@@ -255,7 +376,8 @@ def main() -> None:
     if not (corpus / "labels.jsonl").exists():
         sys.exit(f"找不到語料：{corpus}/labels.jsonl（先跑 build_wake_corpus.py）")
 
-    if args.cascade:
+    engine = "cascade" if args.cascade else args.engine
+    if engine == "cascade":
         cfg = Config()
         cfg.audio.blocksize = BLOCK
         if args.gate_words:
@@ -269,6 +391,21 @@ def main() -> None:
         cfg.wake.verify_min_conf = args.stage2_conf
         res = _run_cascade(corpus, cfg)
         _print(res, verbose=not args.quiet)
+        return
+
+    if engine == "oww":
+        thresholds = [args.oww_threshold]
+        if args.oww_threshold_sweep:
+            thresholds = [float(value) for value in args.oww_threshold_sweep.split(",")]
+        for threshold in thresholds:
+            result = _run_oww(
+                corpus,
+                args.oww_model,
+                threshold,
+                args.oww_confirmation_frames,
+                args.oww_vad_threshold,
+            )
+            _print(result, verbose=not args.quiet)
         return
 
     confs = [args.stage1_conf]

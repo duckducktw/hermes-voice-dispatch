@@ -82,9 +82,17 @@ class ClapConfig:
 @dataclass
 class WakeConfig:
     # 喚醒方式：
-    #   "kws"  = openWakeWord 神經網路關鍵詞模型（真實助手做法，推薦）
+    #   "kws" = 現行 Vosk 串接式 KWS（預設，保留既有行為）
+    #   "openwakeword" = 自訂 hey_hermes ONNX 神經網路 KWS
     #   "clap" = 舊做法：拍手兩下 → 錄一段 → STT 比對字串（慢、易幻覺，只留作退路）
     mode: str = "kws"
+    # ── mode="openwakeword" ──────────────────────────────────────
+    # Hermes 內建的已訓練 hey_hermes 模型；路徑可由 YAML 覆寫。
+    oww_model: str = "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
+    oww_threshold: float = 0.6
+    oww_confirmation_frames: int = 3
+    # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
+    oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。
     # 想要「Hermes」需另外訓練自訂模型（openWakeWord 目前只支援英文喚醒詞）。
     kws_models: List[str] = field(default_factory=lambda: ["hey_jarvis"])

@@ -41,7 +41,13 @@ clap:                     # 雙拍手偵測（校正方式見 README）
   refractory_sec: 0.08    # 一次瞬變後的不反應期
 
 wake:
-  mode: "kws"             # "kws"＝關鍵詞偵測（預設）；"clap"＝舊的拍手路徑（退路）
+  mode: "kws"             # "kws"＝現行串接 KWS（預設）；"openwakeword"＝自訂 ONNX；"clap"＝舊路徑
+  # ── mode="openwakeword" ─────────────────────────────────────────
+  # 本機已訓練的 hey_hermes 模型；openWakeWord 載入失敗時會記 warning 並回退到 kws。
+  oww_model: "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
+  oww_threshold: 0.6
+  oww_confirmation_frames: 3
+  oww_vad_threshold: 0.0  # 0=關；>0 時使用 openWakeWord 內建 Silero VAD 閘控
   kws_engine: "vosk"      # "vosk"（支援任意英文詞，現行預設）/"openwakeword"
   # ══ 串接式喚醒（2026-09-26 使用者定案：極限精準 + 極限延遲）══════════════
   #  第一階段「hey」閘門（常開、極省、可 partial 即時觸發）
