@@ -94,11 +94,13 @@ class WakeConfig:
     # ── mode="openwakeword" ──────────────────────────────────────
     # Hermes 內建的已訓練 hey_hermes 模型；路徑可由 YAML 覆寫。
     oww_model: str = "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
-    # 0.5 在離線校準裡很寬（正/負差 ~1000 倍）。真實房間分數會比 TTS 低 →
-    # 叫不醒往下調（0.3→0.2）、誤喚醒往上調。
-    oww_threshold: float = 0.5
-    # 連續幾個 80ms 幀都過門檻才算命中（預設 3；2 = 寬鬆一點、早 80ms 醒）。
-    oww_confirmation_frames: int = 2
+    # 2026-09-26 實測（daemon log、使用者本人喊聲）：命中 = **0.94／0.96／0.96**；
+    # 離線負樣本（hey harry／the army／her mess／hermit／白噪音）全部 0.000~0.001；
+    # 而且 25 分鐘內只有 1 筆觀測事件（環境很乾淨）→ 門檻可以拉高來**避免誤判**：
+    # 0.7 遠低於他的 0.94、又遠高於雜訊底（~0.001）。
+    oww_threshold: float = 0.7
+    # 連續 3 個 80ms 幀都過門檻才算命中（＝至少 240ms 連續命中，更抗單一雜訊尖峰）。
+    oww_confirmation_frames: int = 3
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。

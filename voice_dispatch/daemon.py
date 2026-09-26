@@ -298,8 +298,11 @@ class VoiceDispatcher:
             log.warning("openWakeWord 不可用，回退 wake.mode=kws 的既有串接引擎。")
             return self._wait_for_wake_kws()
 
+        threshold_in_use = float(self.cfg.wake.oww_threshold)
         while not self._stop:
             frozen = {"hit": False, "blocks": 0}
+            peak_since = 0.0
+            last_report = time.time()
             with audio.input_stream(self.cfg.audio) as stream:
                 self._log_stream_health(stream)
                 if self._stop:
@@ -328,6 +331,20 @@ class VoiceDispatcher:
                             wake_detect.latest_score,
                         )
                         return True
+                    # 觀測：每 ~5 秒回報一次「這段期間的最高分」，只在有動靜（>=0.05）時印。
+                    # 用途：使用者喊了卻沒醒時，可以從 log 判斷是
+                    #   (a) 分數有動但不到門檻 → 調門檻；
+                    #   (b) 完全沒動（<0.05）→ 音訊沒進到模型（裝置／音量／取樣率）。
+                    if wake_detect.latest_score > peak_since:
+                        peak_since = wake_detect.latest_score
+                    if time.time() - last_report >= 5.0:
+                        if peak_since >= 0.05:
+                            log.info(
+                                "openWakeWord 觀測：近 5 秒最高分 %.3f（門檻 %.2f）",
+                                peak_since, threshold_in_use,
+                            )
+                        peak_since = 0.0
+                        last_report = time.time()
                 if frozen["hit"]:
                     log.warning("擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",
                                 frozen["blocks"])
