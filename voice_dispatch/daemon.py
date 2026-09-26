@@ -55,6 +55,33 @@ def pick_report(rows, last_spoken_id: int) -> Optional[tuple]:
         best = (int(mid), str(content))
     return best
 
+
+def human_took_over(messages) -> bool:
+    """串內訊息裡有沒有「真人」（非 bot／非 webhook）的發言＝任務被接管。
+
+    2026-09-26 使用者：「**如果語音任務被我打字或 dc 語音接管就不要 tts 回報了**」。
+    為什麼用 Discord 端判斷而不是解析 session DB：DB 裡的使用者訊息不管「打字」還是
+    「語音 relay」（都是 gateway 注入的）長得幾乎一樣，只能靠脆弱的字串特徵分辨；
+    但**串內有沒有一則真人發的訊息**是客觀事實（打字／DC 語音都會在串內留一則
+    `author.bot=False` 的訊息），而且不依賴 Hermes 內部格式。
+
+    只算一般訊息（type 0）與回覆（type 19）；系統訊息（如 type 1「已加入成員」、
+    type 21 串首）不算。webhook（我 mimiced bot 發的那則）也不算。
+    """
+    for m in messages if isinstance(messages, list) else []:
+        if not isinstance(m, dict):
+            continue
+        if int(m.get("type", 0) or 0) not in (0, 19):
+            continue
+        if m.get("webhook_id"):
+            continue
+        a = m.get("author") or {}
+        if a.get("bot") or not str(a.get("id") or ""):
+            continue
+        return True
+    return False
+
+
 log = logging.getLogger("voice_dispatch")
 
 
@@ -941,6 +968,23 @@ class VoiceDispatcher:
                     or "仍在處理中" in t
                 )
 
+            def _took_over() -> bool:
+                """串內有沒有真人發言（打字／DC 語音）＝任務被接管 → 不要 TTS 回報。
+
+                只在「要唸之前」檢查（每次最多 1 個 API 呼叫），失敗時寧可照唸（回 False），
+                免得因為一時讀不到串就整個不回報。
+                """
+                try:
+                    c = DiscordClient(self.cfg, logger=log)
+                    msgs = _as_list(c.get_messages(thread_id, 20))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("檢查是否被接管失敗（%s）→ 當作沒被接管", exc)
+                    return False
+                if human_took_over(msgs):
+                    log.info("串內有真人發言 → 任務已被你接管，這輪不 TTS 回報")
+                    return True
+                return False
+
             def _db_watch() -> Optional[bool]:
                 """盯 session DB：回合結束＋安靜 settle 秒 → 唸最終回覆；唸完**繼續盯**。
 
@@ -1005,6 +1049,9 @@ class VoiceDispatcher:
                             )
                             if pick:
                                 mid, content = pick
+                                if _took_over():
+                                    # 任務已被真人接管（打字／DC 語音）→ 不再出聲，收工。
+                                    return True
                                 if _speak(content):
                                     spoken += 1
                                     last_spoken_id = mid
@@ -1051,6 +1098,9 @@ class VoiceDispatcher:
                         last_seen = newest
                         last_change = time.time()
                     elif last_seen and (time.time() - last_change) >= quiet_needed:
+                        if human_took_over(msgs):
+                            log.info("串內有真人發言 → 任務已被你接管，這輪不 TTS 回報")
+                            return
                         for m in msgs:
                             author_id = str((m.get("author") or {}).get("id", ""))
                             content = str(m.get("content", ""))
