@@ -107,6 +107,15 @@ tts:
   gemini_api_key_env: "GOOGLE_API_KEY"      # 從 .env 這個變數名取 key
   gemini_env_file: "~/.hermes/.env"
   gemini_timeout_sec: 60.0
+  # 品質守門：合成後「字/秒」低於此值＝Gemini 很可能把風格指示也唸出來 → 去掉指示重合成。
+  gemini_min_cps: 3.0
+  # 語速：優先用 speak_cps 正規化（每秒幾個字，跨 model 一致）；0＝改用 speed 固定倍率。
+  # 同一 voice 在不同 Gemini model 語速差很多（3.1→4.6s／3.8→5.72s／lite→6.64s），
+  # 而免費層配額用完會自動換 model，所以固定倍率會忽快忽慢。
+  speak_cps: 5.2
+  speed: 1.0
+  # edge 引擎的語速字串（gemini 靠上面的 speak_cps 控）
+  rate: "+30%"
   ok_prompt: "OK，請說出你的需求。"
   confirm_template: "我理解成：{transcript}。對嗎？"
   unclear_prompt: "抱歉我沒聽清楚，請再說一次要或不要。"

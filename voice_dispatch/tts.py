@@ -345,6 +345,83 @@ def _gemini_write_audio(data: bytes, out_path: str) -> None:
             pass
 
 
+def _apply_speed(path: str, speed: float, logger=None) -> None:
+    """用 ffmpeg atempo 精準調語速（**不變調**，音色不受影響）。
+
+    為什麼不用「風格指示」控速度：實測在 prompt 裡寫「語速稍快」與「語速偏快」，
+    Gemini 回傳的檔案**逐位元相同**（都 18860 bytes / 4.6s）——指示對速度幾乎沒有
+    可調性。所以改成合成後用 atempo 後處理：`speed=1.15` ＝快 15%，是精準、可微調、
+    且兩引擎（edge/gemini）都通用的旋鈕。
+
+    atempo 單段有效範圍 0.5~2.0；超出就串接多段。
+    """
+    remaining = float(speed)
+    if remaining <= 0 or abs(remaining - 1.0) < 0.01:
+        return
+    filters = []
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    filters.append(f"atempo={remaining:.4f}")
+    tmp = path + ".speed.mp3"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+         "-filter:a", ",".join(filters), tmp],
+        check=True,
+    )
+    os.replace(tmp, path)
+    if logger:
+        logger.info("TTS 語速調整：x%.3f", speed)
+
+
+def _duration(path: str) -> float:
+    """用 ffprobe 量音檔長度（秒）。量不到回 0。"""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, check=True).stdout.strip()
+        return float(out)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _cps(path: str, n_chars: int) -> float:
+    """回傳「字/秒」（量不到回 0）。用來抓 Gemini 把風格指示也唸出來的異常。"""
+    dur = _duration(path)
+    return (n_chars / dur) if (dur > 0.3 and n_chars > 0) else 0.0
+
+
+def normalise_pace(path: str, text: str, target_cps: float, logger=None) -> None:
+    """把語速**正規化**成「每秒 target_cps 個字」，靠 atempo 後處理。
+
+    為什麼需要（2026-09-26 實測）：同一顆 voice 在不同 Gemini TTS model 上語速差很多——
+    Charon 同一句話 3.1-flash-tts＝4.6s、3.8-flash-tts＝5.72s、3.8-flash-lite＝6.64s。
+    而免費層每顆 model 只有 10 次/天，配額用完就會自動換顆 → 固定倍率（speed）會讓
+    語速忽快忽慢。改成「先量實際秒數、再算出該補多少 atempo」，不論抽到哪顆都一樣快。
+
+    只在字數足夠時動作（太短的量測誤差大）。
+    """
+    n = len([c for c in (text or "") if not c.isspace()])
+    if n < 8:
+        return
+    dur = _duration(path)
+    if dur <= 0.3:
+        return
+    # 方向別搞反：atempo 是「倍率」，要從 actual 字/秒 調到 target 字/秒
+    #   → atempo = target / actual（>1＝加速）。實測曾寫成 actual/target → 越調越慢。
+    actual_cps = n / dur
+    atempo = float(target_cps) / actual_cps
+    atempo = min(max(atempo, 0.7), 1.6)   # 保護：別把聲音拉壞
+    if logger:
+        logger.info("TTS 語速正規化：%.2f 字/秒 → 目標 %.2f（atempo x%.3f，原 %.2fs）",
+                    actual_cps, target_cps, atempo, dur)
+    _apply_speed(path, atempo, logger=None)
+
+
 def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> str:
     """用 Google Gemini TTS 合成（比 edge-tts 更像真人，且能演出「商業大佬」口吻）。
 
@@ -380,32 +457,49 @@ def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> 
         getattr(cfg.tts, "gemini_model_fallbacks", []) or []
     )
     last_err: Optional[Exception] = None
+    # 每個 model 最多試兩種 prompt：先帶風格指示；若發現它把指示也唸出來，就退回純台詞。
+    attempts = [(True, prompt)] if style else []
+    attempts.append((False, text))
+    min_cps = float(getattr(cfg.tts, "gemini_min_cps", 3.0) or 3.0)
+    n_chars = len([c for c in text if not c.isspace()])
     for model in [m for m in models if m]:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent?key={key}")
-        body = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
-            },
-        }
-        req = urllib.request.Request(
-            url, data=_json.dumps(body).encode(), headers={"Content-Type": "application/json"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                payload = _json.load(resp)
-            data = base64.b64decode(
-                payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        for with_style, body_text in attempts:
+            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"{model}:generateContent?key={key}")
+            body = {
+                "contents": [{"parts": [{"text": body_text}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
+                },
+            }
+            req = urllib.request.Request(
+                url, data=_json.dumps(body).encode(), headers={"Content-Type": "application/json"}
             )
-        except Exception as exc:  # noqa: BLE001 - 換下一個 model（配額/網路/格式）
-            last_err = exc
-            continue
-        _gemini_write_audio(data, out_path)
-        if logger:
-            logger.info("TTS 合成（gemini %s，voice=%s，%d bytes）", model, voice, len(data))
-        return out_path
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    payload = _json.load(resp)
+                data = base64.b64decode(
+                    payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                )
+            except Exception as exc:  # noqa: BLE001 - 配額/網路/格式 → 換下一顆 model
+                last_err = exc
+                break
+            _gemini_write_audio(data, out_path)
+            # 品質守門：Gemini 偶爾會把「# 風格指示」也當台詞唸出來。
+            # 實測 26 字的句子正常約 4.6~6.6s；唸出指示會變成 15.3s（字/秒 掉到 1.7）。
+            cps = _cps(out_path, n_chars)
+            if with_style and n_chars >= 8 and 0 < cps < min_cps:
+                if logger:
+                    logger.warning(
+                        "Gemini 疑似連風格指示一起唸（%.2f 字/秒 < %.2f）→ 去掉指示重合成",
+                        cps, min_cps)
+                continue
+            if logger:
+                logger.info("TTS 合成（gemini %s，voice=%s，%d bytes，%.2f 字/秒%s）",
+                            model, voice, len(data), cps,
+                            "" if with_style else "，無風格指示")
+            return out_path
     raise RuntimeError(f"Gemini TTS 全部 model 都失敗：{last_err}")
 
 
@@ -442,6 +536,12 @@ def speak(text: str, cfg: Config, logger=None) -> bool:
                 synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
         else:
             synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+        # 語速：優先「正規化」（跨 model 一致）；沒設才用固定倍率 speed。
+        cps = float(getattr(cfg.tts, "speak_cps", 0.0) or 0.0)
+        if cps > 0:
+            normalise_pace(path, text, cps, logger=logger)
+        else:
+            _apply_speed(path, float(getattr(cfg.tts, "speed", 1.0) or 1.0), logger=logger)
     except Exception as exc:  # noqa: BLE001 - 網路/合成失敗都不該讓主流程崩潰
         if logger:
             logger.warning("TTS 合成失敗：%s", exc)
