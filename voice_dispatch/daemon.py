@@ -636,6 +636,81 @@ class VoiceDispatcher:
             except Exception as exc:  # noqa: BLE001
                 log.warning("心跳發送失敗：%s", exc)
 
+        def _watch_thread_for_result():
+            """webhook 模式專用：agent 在 gateway 內跑，我們沒有 stdout 可以讀，所以改成
+            **盯討論串**——等串內安靜下來（連續 `quiet` 秒沒有新訊息）就取最後一則當結果
+            用「講的」回報，藉此保住原本的語音回報功能。硬上限 25 分鐘。
+
+            用 nested function + daemon thread 跑，不阻塞主迴圈。
+            """
+            import threading as _th
+
+            quiet_needed = float(getattr(self.cfg.tts, "speak_result_quiet_sec", 60.0) or 60.0)
+            deadline = time.time() + 25 * 60
+
+            def _loop():
+                c = DiscordClient(self.cfg, logger=log)
+                last_seen = ""
+                last_change = time.time()
+                spoken = ""
+                while time.time() < deadline and not self._stop:
+                    try:
+                        msgs = _as_list(c.get_messages(thread_id, 20))
+                    except Exception:  # noqa: BLE001
+                        time.sleep(10)
+                        continue
+                    newest = max((str(m.get("id", "")) for m in msgs), default="")
+                    if newest and newest != last_seen:
+                        last_seen = newest
+                        last_change = time.time()
+                    elif last_seen and (time.time() - last_change) >= quiet_needed:
+                        # 安靜下來：把最後一則（且非心跳/公告）當結果講出來
+                        text = ""
+                        for m in msgs:
+                            if str(m.get("id", "")) == last_seen:
+                                text = str(m.get("content", ""))
+                                break
+                        text = text.strip()
+                        if (text and text != spoken
+                                and "仍在處理中" not in text
+                                and not text.startswith("🎙️")
+                                and not text.startswith("⚠️ 派工失敗")):
+                            try:
+                                summary = spoken_summary(
+                                    text,
+                                    int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160),
+                                )
+                                if summary:
+                                    log.info("語音回報結果（webhook 模式，讀串）：%s", summary[:80])
+                                    tts.speak(summary, self.cfg, logger=log)
+                                    spoken = text
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning("語音回報失敗：%s", exc)
+                        return
+                    time.sleep(5)
+
+            _th.Thread(target=_loop, daemon=True).start()
+
+        # ── 派工：預設走 gateway webhook（agent 在 gateway 內跑 → 逐字串流進討論串）；──
+        #    沒有 webhook secret 或 POST 失敗 → 回退舊的 spawn `hermes -z`。
+        wh = getattr(self.cfg, "webhook", None)
+        use_webhook = bool(
+            wh and getattr(wh, "enabled", False) and getattr(wh, "secret", "")
+        )
+        if use_webhook:
+            try:
+                dispatch.post_webhook(prompt, channel_id, thread_id, self.cfg, logger=log)
+                _watch_thread_for_result()
+            except Exception as exc:  # noqa: BLE001
+                log.error("webhook 派工失敗：%s → 回退 spawn hermes", exc)
+                use_webhook = False
+            else:
+                client.post_thread_message(thread_id, self.cfg.discord.dispatched_notice)
+                if self.cfg.tts.prompt_mode != "chime":
+                    tts.speak(self.cfg.tts.dispatched_prompt, self.cfg, logger=log)
+                log.info("webhook 派工完成，thread=%s", thread_id)
+                return
+
         try:
             dispatch.spawn_hermes(
                 prompt, self.cfg, thread_id, logger=log, on_exit=_on_exit,
@@ -670,8 +745,10 @@ class VoiceDispatcher:
             f"[討論串名稱] {thread_name}（長度 {len(thread_name)}）",
             "[討論串任務卡]",
             task_card,
-            "[將背景執行的指令]",
-            f"  {argv[0]} {argv[1]} <dispatch_prompt>",
+            "[派工方式]",
+            (f"  webhook → {self.cfg.webhook.url}（agent 在 gateway 內跑，逐字串流進討論串）"
+             if getattr(self.cfg.webhook, "enabled", False) and self.cfg.webhook.secret
+             else f"  spawn：{argv[0]} {argv[1]} <dispatch_prompt>（無 webhook 設定）"),
             "[dispatch_prompt 內容]",
             prompt,
             "==========================================================",

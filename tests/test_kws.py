@@ -94,3 +94,25 @@ def test_variants_respects_confidence():
     assert kws.match_wake_variants(["hey", "hermes"], [1.0, 0.4], _PRE, _VAR, 0.5) is None
     # 前綴信心度低不影響（實測 "a hermes" 的 a 只有 0.44，仍要接受）
     assert kws.match_wake_variants(["a", "hermes"], [0.44, 1.0], _PRE, _VAR, 0.5) == "a hermes"
+
+
+def test_bare_variant_opt_in():
+    """第二階段（閘門已響）允許裸變體；預設（常開路徑）仍不接受。
+
+    實證：daemon log 2026-09-26 15:39:13，使用者喊了喚醒詞，窗內全詞彙轉錄是裸
+    `hermes`（conf 1.0）卻被「找不到前綴」否決 → 使用者抱怨「喊了都沒反應」。
+    """
+    # 預設：單喊 hermes 不算（避免常開路徑被單詞觸發）
+    assert kws.match_wake_variants(["hermes"], [1.0], _PRE, _VAR, 0.5) is None
+    # 第二階段：閘門已確認 hey → 裸變體接受
+    assert kws.match_wake_variants(["hermes"], [1.0], _PRE, _VAR, 0.5,
+                                   allow_bare_variant=True) == "hermes"
+    # 裸變體仍受信心度門檻拘束
+    assert kws.match_wake_variants(["hermes"], [0.2], _PRE, _VAR, 0.5,
+                                   allow_bare_variant=True) is None
+    # 近似音仍被否決（判別力來自變體集合，不是靠前綴）
+    assert kws.match_wake_variants(["hermit"], [1.0], _PRE, _VAR, 0.5,
+                                   allow_bare_variant=True) is None
+    # 完整 bigram 仍優先回傳（訊息較可讀）
+    assert kws.match_wake_variants(["hey", "hermes"], [1.0, 1.0], _PRE, _VAR, 0.5,
+                                   allow_bare_variant=True) == "hey hermes"

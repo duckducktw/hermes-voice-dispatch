@@ -91,12 +91,20 @@ def transcribe_wav(wav_path: str, cfg: Config, logger=None, model: str = "") -> 
     if chosen:
         argv.append(chosen)
 
+    # 推論裝置：把 cfg.stt.device 傳給腳本（腳本讀 HERMES_STT_DEVICE，預設 auto＝有 CUDA
+    # 就走 GPU）。保留這個入口是為了必要時能做 A/B 或臨時改裝置，預設不動。
+    env = dict(os.environ)
+    device = getattr(cfg.stt, "device", "")
+    if device:
+        env["HERMES_STT_DEVICE"] = str(device)
+
     try:
         proc = subprocess.run(
             argv,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=cfg.stt.timeout_sec,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise SttError(f"無法執行 STT 腳本：{exc}") from exc

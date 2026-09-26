@@ -93,7 +93,8 @@ class WakeWordSpotter:
         return hit
 
 
-def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0):
+def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0,
+                        allow_bare_variant: bool = False):
     """接受規則：轉錄 token 序列中出現 `(前綴)(變體)` 的**相鄰 bigram**，且兩個 token
     的信心度都 ≥ `min_conf`，就回傳命中的字串，否則 None。
 
@@ -101,6 +102,14 @@ def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0
     `homes`/`hums`，開頭的 "hey" 也可能被聽成 `a`/`the`。所以兩側都用「集合」放寬，
     而否決力來自變體集合本身：`hermit`/`mess`/`miss`/`mouse`/`mom`/`harm` 都不在裡面。
     純函式，方便單元測試。
+
+    `allow_bare_variant`（2026-09-26 加）：**只給第二階段用**。第二階段能被呼叫，代表
+    第一階段的「hey 閘門」已經響過（串接式喚醒），前綴在這個前提下是**已知事實**；而
+    全詞彙解碼很容易把開頭的 hey 吃掉／聽成不在前綴集合裡的字。實測（daemon log
+    2026-09-26 15:39:13）使用者喊了喚醒詞，窗內轉錄是裸 `hermes`（conf 1.0）卻被
+    「找不到前綴」否決——這就是使用者抱怨「喊了都沒反應」的頭號漏判型態。所以此模式下
+    允許「單獨一個變體 token」也算命中（判別力仍來自嚴格的變體集合）。常開路徑
+    （單階段／無確認階段）不可開這個，否則單喊 hermes 就會觸發。
     """
     pset = {str(w).lower().strip() for w in prefixes}
     vset = {str(w).lower().strip() for w in variants}
@@ -111,6 +120,11 @@ def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0
             # 硬套門檻會把真陽性擋掉。前綴只需「存在」。
             if confs[i + 1] >= min_conf:
                 return f"{tokens[i]} {tokens[i + 1]}"
+    if allow_bare_variant:
+        # 找不到完整的 (前綴)(變體)，但閘門已確認前綴 → 裸變體也接受。
+        for i, tok in enumerate(tokens):
+            if tok in vset and confs[i] >= min_conf:
+                return tok
     return None
 
 
@@ -329,8 +343,10 @@ class WakeVerifier:
         # 診斷用（2026-09-26）：講了 hey hermes 卻沒醒時，log 要能一眼看出是被
         # 變體集合否決（文字不對）還是被 verify_min_conf 擋掉（文字對、conf 太低）。
         self.latest_scored = list(zip(tokens, confs))
+        # allow_bare_variant=True：第二階段＝閘門（hey）已響過才被呼叫，前綴是已知事實，
+        # 不再要求轉錄裡也要看到它（見 match_wake_variants 說明）。
         return match_wake_variants(tokens, confs, self.prefixes, self.variants,
-                                   self.min_conf) is not None
+                                   self.min_conf, allow_bare_variant=True) is not None
 
 
 class SileroVad:

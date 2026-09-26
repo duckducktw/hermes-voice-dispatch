@@ -292,7 +292,14 @@ class TtsConfig:
 class SttConfig:
     # STT 一律經由此包裝腳本（cgroup 保護，避免 OOM），回傳一行 JSON
     scoped_script: str = "~/.hermes/scripts/voice_task/stt_scoped.sh"
-    model: str = ""                 # 空字串 = 用腳本預設模型（large-v3）
+    # 用「預先量化好的 int8」模型而非原始 fp16：ctranslate2 對 fp16 模型每次載入都要
+    # 現場量化，實測 large-v3 載入 17.9s（GPU 峰值 93%）＝使用者說的「說一句卡一次」。
+    # ellisd/faster-whisper-large-v3-int8 是同一個 large-v3 的 int8 CT2 版，載入只要
+    # 2.2s、VRAM 更低，而且對 14 則真實語音轉錄**逐字完全相同**（2026-09-26 實測）。
+    # 換掉不影響辨識品質，只是不再每次講話都重載/重量化整個模型。
+    model: str = "ellisd/faster-whisper-large-v3-int8"
+    # 推論裝置："auto"（預設＝有 CUDA 走 GPU）／"cuda"／"cpu"。
+    device: str = "auto"
     # 喚醒詞只用來比對「hermes」，不需要 large-v3。實測單次耗時：
     # large-v3 7.0s / small 2.6s / base 1.9s（皆有認出 Hermes）。
     # 喚醒詞是冷啟動路徑，每省 4 秒都很有感，所以單獨用快模型。
@@ -358,6 +365,25 @@ class DispatchConfig:
 
 
 @dataclass
+class WebhookConfig:
+    """派工改走 gateway 的 Hermes webhook：讓 agent 在 **gateway 內**跑，回覆由 gateway 的
+    streaming（逐字編輯同一則訊息）即時貼進 Discord 討論串＝跟打字一樣看到它在動。
+
+    為什麼（2026-09-26 使用者：「webhook 那個及時真實打字幹活沒有實作」）：
+    `hermes -z` 是一次性 CLI，只把最終輸出印到 stdout、**不經過 gateway**，所以整段工作
+    期間討論串是安靜的（只有 agent 自己記得發的訊息）。改 POST 本機 webhook →
+    gateway 跑 agent → 逐字串流進串。前置條件（在 ~/.hermes/config.yaml）：
+    `streaming.enabled: true` 且 `platforms.webhook` 已啟用並有 `voice-task` route。
+    """
+    enabled: bool = True
+    # gateway 監聽的本機 webhook；route 名 = voice-task。
+    url: str = "http://127.0.0.1:8644/webhooks/voice-task"
+    # HMAC 密鑰（route secret）。空字串＝不啟用，回退舊的 spawn `hermes -z`。
+    secret: str = ""
+    timeout_sec: float = 20.0
+
+
+@dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     clap: ClapConfig = field(default_factory=ClapConfig)
@@ -368,6 +394,7 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     dispatch: DispatchConfig = field(default_factory=DispatchConfig)
+    webhook: WebhookConfig = field(default_factory=WebhookConfig)
     # 主 log 檔（daemon 生命週期用）
     log_file: str = "~/.local/state/hermes-voice-dispatch/dispatch.log"
 

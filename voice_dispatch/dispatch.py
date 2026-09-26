@@ -116,3 +116,61 @@ def extract_stdout(log_file: str) -> str:
              and not ln.startswith("argv=")]
     return "\n".join(lines).strip()
 
+
+# ---------------------------------------------------------------------------
+# Webhook 派工（agent 在 gateway 內跑 → gateway streaming 逐字貼進討論串）
+# ---------------------------------------------------------------------------
+def _sign_v2(secret: str, timestamp: str, body: bytes) -> str:
+    """gateway webhook 的通用 V2 簽章：hex HMAC-SHA256("<timestamp>.<body>")。"""
+    import hashlib
+    import hmac
+
+    return hmac.new(
+        secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256
+    ).hexdigest()
+
+
+def post_webhook(
+    prompt: str, channel_id: str, thread_id: str, cfg: Config, logger=None
+) -> dict:
+    """POST 需求到本機 gateway webhook，觸發 gateway 內的 agent run。
+
+    成功＝gateway 回 202（非阻塞：它自己背景跑 agent），回傳回應 JSON。
+    失敗會 raise，讓呼叫端可以回退到 spawn `hermes -z`。
+    """
+    import json
+    import time as _time
+    import urllib.error
+    import urllib.request
+
+    wh = cfg.webhook
+    if not wh.secret:
+        raise RuntimeError("cfg.webhook.secret 為空，無法簽章（改用 spawn 路徑）")
+
+    payload = {"prompt": prompt, "channel_id": str(channel_id),
+               "thread_id": str(thread_id)}
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ts = str(int(_time.time()))
+    req = urllib.request.Request(
+        wh.url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": ts,
+            "X-Webhook-Signature-V2": _sign_v2(wh.secret, ts, body),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=float(wh.timeout_sec)) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            data = json.loads(raw) if raw else {}
+            if logger:
+                logger.info("webhook 派工已受理（HTTP %s）：%s", resp.status, data)
+            return data
+    except urllib.error.HTTPError as exc:  # noqa: PERF203
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"webhook HTTP {exc.code}：{detail}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"webhook POST 失敗：{exc}") from exc
+
