@@ -41,8 +41,17 @@ clap:                     # 雙拍手偵測（校正方式見 README）
   refractory_sec: 0.08    # 一次瞬變後的不反應期
 
 wake:
-  window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
   cooldown_sec: 10.0      # 喚醒詞沒過之後的冷卻秒數（避免誤觸時反覆載入 STT 模型）
+  mode: "kws"             # "kws"＝關鍵詞偵測（預設）；"clap"＝舊的拍手路徑（退路）
+  kws_engine: "vosk"      # "vosk"（支援任意英文詞，現行預設）/"openwakeword"
+  vosk_model: "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
+  # 喚醒詞彙表。命中判斷是**詞序比對**：多詞項目＝要求整句講全。
+  # 2026-09-26 使用者定案：喚醒詞＝「hey hermes」（只喊 hermes 不再觸發）。
+  vosk_words:
+    - "hey hermes"
+  vosk_min_conf: 0.9      # per-word 信心度門檻（0.8→0.9＝「太敏感」的修正）
+  # ── mode="clap"（舊路徑）才用 ──────────────────────────────
+  window_sec: 2.5         # 拍手後錄多久去比對喚醒詞
   keywords:               # 命中任一即喚醒（比對前會正規化）
     - "hermes"
     - "赫米斯"

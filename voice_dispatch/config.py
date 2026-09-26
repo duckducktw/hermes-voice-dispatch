@@ -96,11 +96,14 @@ class WakeConfig:
     #   "openwakeword" = 預訓練模型，不支援自訂詞（只有 hey_jarvis 等）。
     kws_engine: str = "vosk"
     vosk_model: str = "~/.local/share/hermes-voice-dispatch/vosk-model-small-en-us-0.15"
-    # 兩詞詞彙表比單詞表好：實測正例 5/5（單詞表只有 4/5，某個聲音漏判），
-    # 也避免「只有一個詞」時任何像語音的東西被強制對上。
+    # 喚醒詞彙表（Vosk 受限詞彙解碼用）。**使用者定案 2026-09-26：喚醒詞＝「hey hermes」**，
+    # 要講全整句才算（只喊 "hermes" 不再觸發）——這是「太敏感」的保守修正。
+    # ⚠️ 命中判斷是**詞序比對**（見 kws.VoskSpotter.feed），不是單字比對：
+    #   grammar 只限制解碼空間，單喊 "hermes" 仍會被 Vosk 強制解成 `hermes`，
+    #   靠詞序（要含 ["hey","hermes"]）才擋得掉。多詞項目＝要求講全。
     # 信心度門檻 0.8 可擋掉近似音（實測 "The hurries of modern life"
     # conf=0.58~0.69 被擋掉）；真同音詞（"Her mess…" conf=1.0）擋不掉，屬正常。
-    vosk_words: List[str] = field(default_factory=lambda: ["hermes", "hey hermes"])
+    vosk_words: List[str] = field(default_factory=lambda: ["hey hermes"])
     # 太敏感 → 0.8 調到 0.9（2026-09-25 使用者反饋「太敏感了」）。
     # 實測正例（含台灣腔）幾乎都 1.0，所以 0.9 不會漏判，但能擋掉更多近似音。
     vosk_min_conf: float = 0.9

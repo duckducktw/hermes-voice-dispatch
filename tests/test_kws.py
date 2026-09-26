@@ -38,3 +38,31 @@ def test_vosk_silence_no_hit():
     sp = kws.VoskSpotter(VOSK, words=["hermes"])
     for _ in range(20):
         assert sp.feed(np.zeros(1024, dtype=np.float32)) is None
+
+
+# ── 詞序比對（喚醒詞＝"hey hermes"，2026-09-26）────────────────────────────
+_HH = [("hey", "hermes")]        # 使用者定案的喚醒詞（token 序列）
+
+
+def test_phrase_match_requires_full_phrase():
+    """只喊 'hermes' 不算命中——要講全 'hey hermes'。"""
+    assert kws.match_wake_phrase(["hermes"], [1.0], _HH, 0.9) is None
+    assert kws.match_wake_phrase(["hey", "hermes"], [1.0, 1.0], _HH, 0.9) == "hey hermes"
+
+
+def test_phrase_match_tolerates_leading_trailing_words():
+    """前後有別的字（[unk]／雜訊）不影響，只看有沒有連著出現。"""
+    assert kws.match_wake_phrase(
+        ["[unk]", "hey", "hermes", "[unk]"], [0.5, 1.0, 1.0, 0.5], _HH, 0.9
+    ) == "hey hermes"
+
+
+def test_phrase_match_respects_confidence():
+    """片段信心度低於門檻 → 不命中。"""
+    assert kws.match_wake_phrase(["hey", "hermes"], [0.5, 1.0], _HH, 0.9) is None
+    assert kws.match_wake_phrase(["hey", "hermes"], [1.0, 0.8], _HH, 0.9) is None
+
+
+def test_phrase_match_reversed_order_no_hit():
+    """詞序顛倒（hermes hey）不算命中。"""
+    assert kws.match_wake_phrase(["hermes", "hey"], [1.0, 1.0], _HH, 0.9) is None

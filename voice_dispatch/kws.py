@@ -93,18 +93,45 @@ class WakeWordSpotter:
         return hit
 
 
+def match_wake_phrase(tokens, confs, phrases, min_conf: float):
+    """詞序比對：token 序列中若含某個詞彙（整段詞序相同）且每個 token 信心度
+    都 ≥ `min_conf`，回傳該詞彙字串，否則 None。
+
+    為什麼需要詞序（而不是 `word in words`）：Vosk 受限詞彙解碼**一定會吐最接近
+    的詞**——即使 grammar 只有 `["hey hermes", "[unk]"]`，單喊 "hermes" 仍會被解成
+    `['hermes']`（conf 1.0）。所以「要講全 hey hermes」必須在這一層用詞序擋：
+    `['hermes']` 不含 `('hey','hermes')` → 不命中。
+
+    純函式（不碰模型），方便單元測試。
+    """
+    for phrase in phrases:
+        n = len(phrase)
+        if not n or n > len(tokens):
+            continue
+        for i in range(len(tokens) - n + 1):
+            if tuple(tokens[i:i + n]) == tuple(phrase) and min(confs[i:i + n]) >= min_conf:
+                return " ".join(phrase)
+    return None
+
+
 class VoskSpotter:
     """用 Vosk 的「限制詞彙解碼」當關鍵詞偵測。
 
     為什麼用它而不是 openWakeWord：openWakeWord 的預訓練模型不支援自訂詞
     （只有 hey_jarvis / alexa …），要「hermes」得訓練自訂模型（Colab + GB 級
-    資料集）。Vosk 只要把解碼詞彙鎖成 `["hermes", "[unk]"]`，就等於關鍵詞
-    偵測——免訓練、免 AccessKey、支援任意英文詞。
+    資料集）。Vosk 只要把解碼詞彙鎖成指定詞，就等於關鍵詞偵測——免訓練、
+    免 AccessKey、支援任意英文詞。
 
-    實測（2026-09-25）：
-      "Hermes" / "Hey Hermes, restart the server" → 命中
-      "Good morning everyone" / "The weather is nice today" → 不命中
-      喇叭→手機麥克風播 "Hey Hermes" → 命中
+    ⚠️ **詞彙表只用來「限制解碼空間」，不能拿來「拒絕」**（2026-09-26 實測）：
+    把 grammar 設成 `["hey hermes", "[unk]"]` 後，只喊 "Hermes." 仍會被 Vosk
+    **強制解成 `hermes`（conf 1.0）**——受限詞彙解碼一定會吐最接近的詞。
+    所以「要講全 hey hermes 才算」**不能靠 grammar**，必須在 `feed()` 做
+    **詞序（phrase）比對**：token 序列要真的含 `["hey","hermes"]` 才命中。
+
+    實測（2026-09-25 / 09-26，edge-tts 英文音檔）：
+      "Hey Hermes."               → tokens [hey, hermes] → 命中
+      "Hey Hermes, restart…"      → [hey, hermes, [unk]] → 命中
+      "Hermes."（只喊單詞）        → tokens [hermes] → **不命中**（詞序比對擋掉）
       4 段真實房間背景（共 56 秒）→ 零誤觸；單次耗時 0.05~0.08s（3 秒音檔）
     """
 
@@ -113,8 +140,10 @@ class VoskSpotter:
         from vosk import KaldiRecognizer, Model, SetLogLevel
 
         SetLogLevel(-1)                 # 別把 kaldi 的 log 灌進我們的 log
-        self.words = [w.lower() for w in (words or ["hermes"])]
+        self.words = [w.lower().strip() for w in (words or ["hermes"]) if w and w.strip()]
         self.min_conf = float(min_conf)
+        # 每個詞彙切成 token 序列（"hey hermes" → ["hey","hermes"]），用於詞序比對。
+        self._phrases = [tuple(p.split()) for p in self.words]
         self._model = Model(_os.path.expanduser(model_path))
         self._rec = KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
         self._rec.SetWords(True)        # 要 per-word conf 才擋得掉近似音誤觸
@@ -129,6 +158,11 @@ class VoskSpotter:
         在只有 1~2 個詞的限制詞彙表下很容易把雜音「強制」解成喚醒詞
         （2026-09-25 實測：啟動暫態就被解成 hermes 而誤觸）。
         代價是判定要等這句講完（約 0.3~0.6 秒），換來的是不亂觸發。
+
+        **命中＝詞序比對**（不是單字比對）：受限詞彙解碼一定會吐最接近的詞，
+        所以只喊 "hermes" 也會被解成 `hermes`——光靠 grammar 擋不掉。
+        這裡要求 result 的 token 序列真的含 `["hey","hermes"]`（且每個 token 的
+        conf ≥ `min_conf`）才算命中，單詞 "hermes" 因此不會觸發。
         """
         pcm = _to_pcm16(samples)
         if pcm.size == 0:
@@ -138,11 +172,10 @@ class VoskSpotter:
             return None
         data = json.loads(self._rec.Result())
         self.latest = data.get("text", "")
-        for w in data.get("result") or []:
-            word = str(w.get("word", "")).lower()
-            if word in self.words and float(w.get("conf", 0.0)) >= self.min_conf:
-                return word
-        return None
+        result = data.get("result") or []
+        tokens = [str(w.get("word", "")).lower() for w in result]
+        confs = [float(w.get("conf", 0.0)) for w in result]
+        return match_wake_phrase(tokens, confs, self._phrases, self.min_conf)
 
 
 class SileroVad:
