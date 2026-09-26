@@ -110,3 +110,7 @@ class DiscordClient:
     def post_thread_message(self, thread_id: str, content: str) -> Dict[str, Any]:
         """發訊息到 thread（thread 本身也是一個 channel）。"""
         return self.post_message(thread_id, content)
+
+    def get_messages(self, channel_id: str, limit: int = 10) -> Any:
+        """讀頻道/討論串最近訊息（回傳 list）。用於判斷 agent 有沒有回報過。"""
+        return self._request("GET", f"/channels/{channel_id}/messages?limit={int(limit)}")

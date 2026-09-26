@@ -3,9 +3,11 @@
 from voice_dispatch.config import Config
 from voice_dispatch.text import (
     classify_confirmation,
+    contains_any,
     is_wake_transcript,
     make_thread_name,
     normalize,
+    spoken_summary,
     truncate_thread_name,
 )
 
@@ -68,3 +70,21 @@ def test_make_thread_name_short():
     name = make_thread_name("重啟伺服器", "09-25 14:30")
     assert name.startswith("🎙️")
     assert "重啟伺服器" in name
+
+
+# ── spoken_summary（派工完成後語音回報用）────────────────────────────────
+def test_spoken_summary_strips_markdown():
+    t = "**完成**：\n- 已把 `bright.py` 跑完\n- rc=0"
+    assert spoken_summary(t) == "完成： 已把 bright.py 跑完 rc=0"
+
+
+def test_spoken_summary_truncates_at_sentence():
+    t = "第一句話講完了。第二句話很長" + "啊" * 200
+    out = spoken_summary(t, max_chars=12)
+    assert out.endswith("。")
+    assert len(out) <= 20
+
+
+def test_spoken_summary_short_passthrough():
+    assert spoken_summary("好了", 160) == "好了"
+    assert spoken_summary("", 160) == ""

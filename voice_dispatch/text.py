@@ -99,3 +99,23 @@ def make_thread_name(
         short = short[:short_len]
     name = template.format(short=short, date=date_str)
     return truncate_thread_name(name, limit)
+
+
+def spoken_summary(text: str, max_chars: int = 160) -> str:
+    """把 Markdown 報告壓成一句「適合念出來」的短摘要（派工完成後用語音回報）。
+
+    - 去掉 Markdown 裝飾（**粗體**、`code`、# 標題、- 項目符號）
+    - 空白正規化
+    - 超過 max_chars 就盡量切在句尾（否則補「…」）
+    """
+    t = re.sub(r"[*_`#>]+", "", text or "")
+    t = re.sub(r"^\s*[-•・]\s*", "", t, flags=re.MULTILINE)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) <= max_chars:
+        return t
+    cut = t[:max_chars]
+    for sep in ("。", "！", "？", "；", ".", "!", "?", ";"):
+        i = cut.rfind(sep)
+        if i >= max_chars // 2:
+            return cut[: i + 1]
+    return cut.rstrip() + "…"

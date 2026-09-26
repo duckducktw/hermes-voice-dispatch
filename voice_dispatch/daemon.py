@@ -25,8 +25,13 @@ import numpy as np
 from . import audio, cascade, dispatch, kws, stt, tts, wake
 from .config import Config
 from .discord_api import DiscordClient
-from .text import classify_confirmation, make_thread_name, normalize
+from .text import classify_confirmation, make_thread_name, normalize, spoken_summary
 from .vad import VadSegmenter, VadState
+
+
+def _as_list(x) -> list:
+    """把 Discord GET 的回應正規化成 list（出錯時可能是 dict 或 None）。"""
+    return x if isinstance(x, list) else []
 
 log = logging.getLogger("voice_dispatch")
 
@@ -579,8 +584,62 @@ class VoiceDispatcher:
         prompt = dispatch.build_dispatch_prompt(
             transcript, channel_id, thread_id, self.cfg
         )
+
+        # 保底機制：派工程序結束時，若 agent **完全沒貼任何訊息到串內**，就把它的
+        # 最終 stdout 貼上去。（2026-09-26 使用者：「他有做事，但都沒輸出到 dc，
+        # 看起來就沒有」——不能只依賴 agent 記得自己跑 `hermes send`。）
         try:
-            dispatch.spawn_hermes(prompt, self.cfg, thread_id, logger=log)
+            _before = {str(m.get("id")) for m in _as_list(client.get_messages(thread_id, 20))}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("讀取串內既有訊息失敗（保底去重會失效）：%s", exc)
+            _before = set()
+
+        def _on_exit(_proc, log_file):
+            text = dispatch.extract_stdout(log_file)
+            if not text:
+                return
+            # 1) 語音回報：做好後用「講的」把結果告訴使用者（2026-09-26 要求）
+            if getattr(self.cfg.tts, "speak_result", True):
+                try:
+                    summary = spoken_summary(
+                        text,
+                        int(getattr(self.cfg.tts, "speak_result_max_chars", 160) or 160),
+                    )
+                    if summary:
+                        log.info("語音回報結果：%s", summary[:80])
+                        tts.speak(summary, self.cfg, logger=log)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("語音回報失敗：%s", exc)
+            # 2) 保底把最終輸出貼回串（若 agent 沒自己貼過任何訊息）
+            try:
+                c2 = DiscordClient(self.cfg, logger=log)
+                after = {str(m.get("id")) for m in _as_list(c2.get_messages(thread_id, 20))}
+                if after - _before:
+                    log.info("派工已自行回報（%d 則）→ 不補貼 stdout", len(after - _before))
+                    return
+                body = text if len(text) <= 1900 else text[:1900] + "\n…（截斷）"
+                c2.post_thread_message(thread_id, f"📄 **最終輸出**（agent 未自行回報）：\n{body}")
+                log.info("agent 未回報 → 已把最終輸出補貼到串 %s", thread_id)
+            except Exception as exc:  # noqa: BLE001
+                log.error("補貼最終輸出失敗：%s", exc)
+
+        def _heartbeat(secs):
+            """派工還在跑 → 在串內發一則心跳，讓使用者知道有在動。"""
+            try:
+                m, s = divmod(int(secs), 60)
+                human = f"{m} 分 {s} 秒" if m else f"{s} 秒"
+                DiscordClient(self.cfg, logger=log).post_thread_message(
+                    thread_id, f"⏳ 仍在處理中…（已 {human}）"
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("心跳發送失敗：%s", exc)
+
+        try:
+            dispatch.spawn_hermes(
+                prompt, self.cfg, thread_id, logger=log, on_exit=_on_exit,
+                heartbeat=_heartbeat,
+                heartbeat_sec=float(getattr(self.cfg.dispatch, "heartbeat_sec", 0.0) or 0.0),
+            )
         except Exception as exc:  # noqa: BLE001 - 派工失敗要讓串內看得見
             log.error("派工失敗：%s", exc)
             try:

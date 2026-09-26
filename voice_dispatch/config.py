@@ -239,6 +239,10 @@ class TtsConfig:
     #       喚醒 → 咚（tone1）咚（tone2）；聽完需求（有講／沒講都算）→ 再一次咚咚。
     #   "voice"＝舊行為，用 edge-tts 講 ok_prompt / retry_prompts / dispatched_prompt。
     prompt_mode: str = "chime"
+    # 派工完成後用「語音」把結果念出來（使用者 2026-09-26 要求）。
+    # 只念一句短摘要（`spoken_summary` 去掉 Markdown、截斷），完整內容仍在 Discord 串內。
+    speak_result: bool = True
+    speak_result_max_chars: int = 160
     # 咚咚＝「有質感的」雙音提示。
     # 兩次退貨記錄（2026-09-25）：
     #   1. 純正弦 + 衰減 → 「空洞的咚咚」
@@ -335,15 +339,22 @@ class DispatchConfig:
         "  channel_id={channel_id}  thread_id={thread_id}\n"
         "回報指令：hermes send --to discord:{channel_id}:{thread_id} \"<訊息>\"\n"
         "\n"
-        "要求（重要，這是為了快）：\n"
+        "要求（重要）：\n"
         "1. 立刻做，不要等待、不要為了確認而反問；只有真的缺關鍵資訊才在串內問一句後停。\n"
-        "2. 只載入真正相關的技能，不要探索無關檔案、也不要讀 daemon 自己的技能"
+        "2. **你做的每一步都要讓使用者在串內看得到**——否則他會以為你沒在做事。\n"
+        "   開工先發一句；之後每完成一個主要步驟就發一行短訊息（做了什麼／結果）；\n"
+        "   不要連續沉默太久。\n"
+        "3. 只載入真正相關的技能，不要探索無關檔案、也不要讀 daemon 自己的技能"
         "（voice-task-pipeline／hermes-voice-dispatch 與你無關）。\n"
-        "3. 回報要短：開工一句、必要時 1~2 句中繼、最後一句結論；不要長篇解釋。\n"
-        "4. 完成後回報「做了什麼＋怎麼驗證」；失敗也要回報原因。"
+        "4. **最後一定要發一則結論**（做了什麼＋怎麼驗證；失敗也發原因）——"
+        "沒發這則 = 沒完成。訊息短即可，但別省掉。"
     )
     # 派工子程序的 log 目錄
     log_dir: str = "~/.local/state/hermes-voice-dispatch/dispatch"
+    # 心跳：派工還在跑時，每幾秒在串內發一則「仍在處理中」。0 = 關閉。
+    # （2026-09-26 使用者：「有做事但都沒輸出到 dc，看起來就沒有」——長任務中間
+    #  沉默太久會讓人以為沒動。心跳讓「有在做事」看得見。）
+    heartbeat_sec: float = 120.0
 
 
 @dataclass
