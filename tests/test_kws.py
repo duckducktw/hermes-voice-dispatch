@@ -90,4 +90,7 @@ def test_variants_rejects_confusables():
 
 
 def test_variants_respects_confidence():
-    assert kws.match_wake_variants(["hey", "hermes"], [0.4, 1.0], _PRE, _VAR, 0.5) is None
+    """信心度門檻套在**變體**上（前綴是功能詞，不套門檻）。"""
+    assert kws.match_wake_variants(["hey", "hermes"], [1.0, 0.4], _PRE, _VAR, 0.5) is None
+    # 前綴信心度低不影響（實測 "a hermes" 的 a 只有 0.44，仍要接受）
+    assert kws.match_wake_variants(["a", "hermes"], [0.44, 1.0], _PRE, _VAR, 0.5) == "a hermes"

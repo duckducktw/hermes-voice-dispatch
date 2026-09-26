@@ -19,6 +19,9 @@ class StubGate:
         self.n = 0
         self.fire_at = 8        # 8×64ms ≈ 0.5s，剛好填滿 preroll_sec=0.5 的環
 
+    def reset_recognizer(self):
+        pass
+
     def feed(self, block):
         self.n += 1
         return "hey" if self.n == self.fire_at else None
@@ -31,6 +34,9 @@ class StubVerifier:
         self._rec = _Rec()
         self.confirm_after = confirm_after
         self.calls = 0
+
+    def reset_recognizer(self):
+        pass
 
     def verify(self, samples):
         self.calls += 1

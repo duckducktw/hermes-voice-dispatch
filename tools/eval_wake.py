@@ -62,9 +62,12 @@ def _run_cascade(corpus: Path, cfg: Config) -> dict:
     for r in rows:
         x = _load_wav(corpus / r["file"])
         det.reset(hard=True)
+        # 補尾端靜音＝模擬連續串流（見 wake_matrix.py 同註解）
+        stream = np.concatenate([x, np.zeros(int((cfg.wake.verify_window_sec + 0.5) * SR),
+                                             dtype=np.float32)])
         woke_at = None
-        for i in range(0, len(x), BLOCK):
-            blk = x[i:i + BLOCK]
+        for i in range(0, len(stream), BLOCK):
+            blk = stream[i:i + BLOCK]
             if det.feed(blk):
                 woke_at = i + len(blk)
                 break

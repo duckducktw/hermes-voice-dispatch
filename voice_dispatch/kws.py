@@ -106,7 +106,10 @@ def match_wake_variants(tokens, confs, prefixes, variants, min_conf: float = 0.0
     vset = {str(w).lower().strip() for w in variants}
     for i in range(len(tokens) - 1):
         if tokens[i] in pset and tokens[i + 1] in vset:
-            if min(confs[i], confs[i + 1]) >= min_conf:
+            # 只對「變體」套信心度門檻：變體才是判別力來源；前綴常是 hey/a/the 這種
+            # 功能詞，全詞彙解碼的信心度本來就偏低（實測 "a hermes" 的 a 只有 0.44），
+            # 硬套門檻會把真陽性擋掉。前綴只需「存在」。
+            if confs[i + 1] >= min_conf:
                 return f"{tokens[i]} {tokens[i + 1]}"
     return None
 
@@ -167,7 +170,7 @@ class VoskSpotter:
     def __init__(self, model_path: str, words=None, min_conf: float = 0.0, logger=None,
                  full_vocab: bool = False, use_partial: bool = False):
         import os as _os
-        from vosk import KaldiRecognizer, Model, SetLogLevel
+        from vosk import Model, SetLogLevel
 
         SetLogLevel(-1)                 # 別把 kaldi 的 log 灌進我們的 log
         self.words = [w.lower().strip() for w in (words or ["hermes"]) if w and w.strip()]
@@ -180,13 +183,7 @@ class VoskSpotter:
         # 「第一階段閘門」（後面還有確認階段負責精度），不適合單獨當最終判定。
         self.use_partial = bool(use_partial)
         self._model = Model(_os.path.expanduser(model_path))
-        if self.full_vocab:
-            # 全詞彙解碼：**不加 grammar**。這樣才看得出實際講的是 "hey hermit"
-            # 還是 "hey hermes"——限制詞彙會把近似音硬解成惟一的候選詞（見兩段式）。
-            self._rec = KaldiRecognizer(self._model, 16000)
-        else:
-            # 限制詞彙解碼：等同關鍵詞偵測，常開路徑用（快、省）。
-            self._rec = KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
+        self._rec = self._new_recognizer()
         self._rec.SetWords(True)        # 要 per-word conf 才擋得掉近似音誤觸
         self.latest = ""
         self.last_conf = 0.0            # 最近一次命中的最小 token 信心度（診斷用）
@@ -194,6 +191,23 @@ class VoskSpotter:
             logger.info(
                 "喚醒詞引擎：vosk（%s，詞彙 %s，信心度門檻 %.2f）",
                 "全詞彙" if self.full_vocab else "限制詞彙", self.words, self.min_conf)
+
+    def _new_recognizer(self):
+        from vosk import KaldiRecognizer
+        if self.full_vocab:
+            # 全詞彙解碼：**不加 grammar**。這樣才看得出實際講的是 "hey hermit"
+            # 還是 "hey hermes"——限制詞彙會把近似音硬解成惟一的候選詞（見兩段式）。
+            return KaldiRecognizer(self._model, 16000)
+        # 限制詞彙解碼：等同關鍵詞偵測，常開路徑用（快、省）。
+        return KaldiRecognizer(self._model, 16000, json.dumps([*self.words, "[unk]"]))
+
+    def reset_recognizer(self) -> None:
+        """**重建**辨識器（`_rec.Reset()` 實測無法完全清掉狀態：餵過雜訊後再解同一段
+        音訊會得到不同結果）。離線評測要把每段獨立音訊當全新一次時呼叫。"""
+        self._rec = self._new_recognizer()
+        self._rec.SetWords(True)
+        self.latest = ""
+        self.last_conf = 0.0
 
     def feed(self, samples) -> Optional[str]:
         """餵入音訊；命中喚醒詞回傳該詞，否則 None。
@@ -281,13 +295,23 @@ class WakeVerifier:
         self.variants = {str(w).lower().strip() for w in variants if str(w).strip()}
         self.min_conf = float(min_conf)
         self._model = Model(_os.path.expanduser(model_path))
-        self._rec = KaldiRecognizer(self._model, 16000)   # 全詞彙（不加 grammar）
+        self._rec = self._new_recognizer()                # 全詞彙（不加 grammar）
         self._rec.SetWords(True)
         self.latest = ""
         if logger:
             logger.info(
                 "喚醒確認器：vosk 全詞彙（前綴 %s / 變體 %s，信心度門檻 %.2f）",
                 sorted(self.prefixes), sorted(self.variants), self.min_conf)
+
+    def _new_recognizer(self):
+        from vosk import KaldiRecognizer
+        return KaldiRecognizer(self._model, 16000)
+
+    def reset_recognizer(self) -> None:
+        """**重建**辨識器（`Reset()` 實測清不乾淨；見 VoskSpotter.reset_recognizer）。"""
+        self._rec = self._new_recognizer()
+        self._rec.SetWords(True)
+        self.latest = ""
 
     def verify(self, samples) -> bool:
         """整段辨識後套 bigram 規則；命中回 True。清空辨識器狀態，可重複呼叫。"""

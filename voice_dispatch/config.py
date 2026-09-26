@@ -122,7 +122,8 @@ class WakeConfig:
     # 觸發後回看的音訊長度（秒）：hey 前的 preroll + hey 之後收到的音訊。
     preroll_sec: float = 1.0
     # 從觸發起到放棄前，最多再收多少秒（去裡面找 hermes）。
-    verify_window_sec: float = 1.5
+    # 2.0s 讓「hey …（停頓）… hermes」有約 1.8s 的預算；實測加大不會增加誤判。
+    verify_window_sec: float = 2.0
     # 收訊期間每隔多久試判一次：越小越早醒、越吃 CPU（每次確認 ~40ms）。
     # 實測最大喚醒延遲：0.15→108ms、0.2→172ms、0.3→300ms（中位數都遠早於語音結束）。
     verify_interval_sec: float = 0.15
@@ -166,7 +167,7 @@ class VadConfig:
     # **我們自己剛剛講的話**，VAD 把它當成使用者需求 → STT → 派工假任務
     # （實測 log 的需求原文 = 它自己的台詞「這次說大聲一點。」「我在聽。」）。
     settle_sec: float = 1.2
-    preroll_timeout_sec: float = 8.0     # 前置靜音等待上限（都沒講話就放棄）
+    preroll_timeout_sec: float = 3.0     # 前置靜音等待上限（都沒講話就放棄；2026-09-26 8→3s）
     trailing_silence_sec: float = 1.2    # 講完後連續靜音多久視為結束
     max_record_sec: float = 60.0         # 單次錄音最長
     min_record_sec: float = 0.5          # 單次錄音最短（低於此不算數）
@@ -315,19 +316,23 @@ class DiscordConfig:
 @dataclass
 class DispatchConfig:
     hermes_bin: str = "hermes"
+    # 2026-09-26 使用者反饋「開啟的串處理速度慢，幾乎不做事」：原因=中轉每次 API 呼叫
+    # 7~9s × 多步工具呼叫（實測一支燈光任務做了 24 次呼叫 ≈ 3 分鐘），加上舊提示詞
+    # 叫它「需要確認就停下來等」。改成：直接動手、少探索、回報精簡、非必要不反問。
     prompt_template: str = (
         "你剛收到一則使用者用「語音」下的需求（語音派工）。需求原文：\n"
         "「{transcript}」\n"
         "\n"
-        "請把這件事當成一般任務處理，並把過程與結果完整回報到這條 Discord 討論串：\n"
+        "直接動手完成，並把結果回報到這條 Discord 討論串：\n"
         "  channel_id={channel_id}  thread_id={thread_id}\n"
         "回報指令：hermes send --to discord:{channel_id}:{thread_id} \"<訊息>\"\n"
         "\n"
-        "步驟：\n"
-        "1. 先在串內發一則開工訊息，說明你打算怎麼做。\n"
-        "2. 執行過程中把重要進度發到串內（不要沉默太久）。\n"
-        "3. 若中途需要使用者確認，就在串內發問並停下來等；使用者會直接在串內回覆你。\n"
-        "4. 完成後把結果發到串內，包含你實際做了什麼、怎麼驗證的。若失敗也要回報失敗原因。\n"
+        "要求（重要，這是為了快）：\n"
+        "1. 立刻做，不要等待、不要為了確認而反問；只有真的缺關鍵資訊才在串內問一句後停。\n"
+        "2. 只載入真正相關的技能，不要探索無關檔案、也不要讀 daemon 自己的技能"
+        "（voice-task-pipeline／hermes-voice-dispatch 與你無關）。\n"
+        "3. 回報要短：開工一句、必要時 1~2 句中繼、最後一句結論；不要長篇解釋。\n"
+        "4. 完成後回報「做了什麼＋怎麼驗證」；失敗也要回報原因。"
     )
     # 派工子程序的 log 目錄
     log_dir: str = "~/.local/state/hermes-voice-dispatch/dispatch"

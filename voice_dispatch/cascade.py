@@ -61,9 +61,10 @@ class WakeCascade:
         self._since = 0             # 觸發後已收幾個 block
         self._next_eval = 0
         if hard:
-            self.gate._rec.Reset()
+            # 用「重建辨識器」而非 `_rec.Reset()`——實測 Reset() 清不乾淨狀態。
+            self.gate.reset_recognizer()
             if self.verifier is not None:
-                self.verifier._rec.Reset()
+                self.verifier.reset_recognizer()
 
     def feed(self, block) -> Optional[str]:
         """餵一個 block；確認喚醒回傳描述字串，否則 None。"""
