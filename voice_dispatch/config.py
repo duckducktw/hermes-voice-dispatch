@@ -103,9 +103,16 @@ class WakeConfig:
     #   的條件沒滿足 → 沒醒）。真實房間分數遠低於離線 TTS 校準值，所以：
     #     門檻 0.7 → 0.45、連續幀 3 → 2（＝160ms）。
     #   環境雜訊底仍只在 0.05~0.22，留了安全邊際。真的**誤喚醒**再往上調。
+    # ⚠️ 2026-09-27（第二輪）使用者：「還是太嚴格」。log 抓到鐵證：
+    #     16:16:33 最高分 0.938、最長連續 1 幀 → 沒醒
+    #     16:19:53 喚醒成功 score=0.96
+    #   → **openWakeWord 的分數是單幀尖峰**（一幀衝高、下一幀就掉），不是平台狀，
+    #     所以「連續 N 幀」這種條件天生就會擋掉正確命中，N 只能設 1。
+    #     誤喚醒的控制改由門檻負責（0.45 高出環境底 0.05~0.34 仍有邊際）。
     oww_threshold: float = 0.45
-    # 連續 2 個 80ms 幀都過門檻才算命中（＝至少 160ms 連續命中，抗單一雜訊尖峰）。
-    oww_confirmation_frames: int = 2
+    # 連續幾個 80ms 幀過門檻才算命中。**openWakeWord 只能是 1**（見上）；
+    # 維持 >1 會讓 0.9x 的命中因為只有一幀而被丟掉。
+    oww_confirmation_frames: int = 1
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。

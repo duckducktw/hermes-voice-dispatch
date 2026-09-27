@@ -23,7 +23,7 @@ def test_defaults():
     assert cfg.discord.thread_name_limit == 100
     assert cfg.wake.mode == "openwakeword"   # 2026-09-26 定案：預設走波形判斷
     assert cfg.wake.oww_threshold == 0.45  # 2026-09-27：房間分數低，放寬避免叫不醒
-    assert cfg.wake.oww_confirmation_frames == 2
+    assert cfg.wake.oww_confirmation_frames == 1  # 單幀尖峰模型，>1 會殺掉正確命中
 
 
 def test_openwakeword_yaml_override(tmp_path):

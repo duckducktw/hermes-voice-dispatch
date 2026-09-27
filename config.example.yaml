@@ -57,9 +57,11 @@ wake:
   oww_model: "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
   # 2026-09-26 實測：使用者本人喊聲命中 **0.94／0.96／0.96**；離線負樣本
   # （hey harry／the army／her mess／hermit／白噪音）全部 0.000~0.001 → 門檻拉高**避免誤判**。
-  # ⚠️ 2026-09-27 實測房間分數只有 0.30~0.44（比 TTS 校準低很多）→ 放寬成 0.45 / 2 幀。
+  # ⚠️ 2026-09-27 實測房間分數只有 0.30~0.44（比 TTS 校準低很多）→ 放寬成 0.45。
+  # 單幀尖峰模型：分數一幀衝高、下一幀就掉，所以連續幀只能是 1（0.938 的命中
+  # 也只維持 1 幀 → 設 2 會把它丟掉）；誤喚醒交給門檻把關。
   oww_threshold: 0.45
-  oww_confirmation_frames: 2   # 連續 2 個 80ms 幀都過才算命中（抗單一雜訊尖峰）
+  oww_confirmation_frames: 1
   oww_vad_threshold: 0.0  # 0=關；>0 時使用 openWakeWord 內建 Silero VAD 閘控
   kws_engine: "vosk"      # "vosk"（支援任意英文詞，現行預設）/"openwakeword"
   # ══ 串接式喚醒（2026-09-26 使用者定案：極限精準 + 極限延遲）══════════════
