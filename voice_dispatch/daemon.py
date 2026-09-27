@@ -94,6 +94,11 @@ class VoiceDispatcher:
         self._recover_count = 0
         self._healthy_since = 0.0   # 連續健康起算點（見 _log_stream_health）
         self._silero = None         # 惰性建立；False = 載入失敗，退回 RMS 門檻
+        # single-flight：這一輪還沒收工時，不接受新的喚醒（2026-09-27 使用者要求）。
+        # 由結果監看執行緒在收工時 _round_end()；保險絲 = wake.single_flight_max_sec。
+        self._round_busy = False
+        self._round_deadline = 0.0
+        self._round_handoff = False  # True = 交棒給結果監看執行緒去解鎖
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -203,16 +208,49 @@ class VoiceDispatcher:
     # ------------------------------------------------------------------
     # R1：喚醒
     # ------------------------------------------------------------------
-    def _echo_muted(self) -> bool:
-        """半雙工閘：我們自己在出聲（或剛出聲完）時，不做喚醒偵測。
+    def _round_begin(self) -> None:
+        """標記「這一輪開始了」——期間不再接受新的喚醒。"""
+        self._round_busy = True
+        self._round_handoff = False
+        limit = float(getattr(self.cfg.wake, "single_flight_max_sec", 0.0) or 0.0)
+        self._round_deadline = (time.time() + limit) if limit > 0 else 0.0
 
-        兩個來源都要擋：
+    def _round_end(self, why: str = "") -> None:
+        """這一輪收工，重新開放喚醒。重複呼叫安全。"""
+        if self._round_busy:
+            log.info("本輪結束，恢復喚醒偵測%s", f"（%s）" % why if why else "")
+        self._round_busy = False
+        self._round_handoff = False
+        self._round_deadline = 0.0
+
+    def _round_active(self) -> bool:
+        """這一輪還在進行中嗎（含保險絲逾時自動解鎖）。"""
+        if not getattr(self.cfg.wake, "single_flight", True):
+            return False
+        if not self._round_busy:
+            return False
+        if self._round_deadline and time.time() > self._round_deadline:
+            log.warning("single-flight 逾時（超過 %.0fs）→ 強制解鎖喚醒",
+                        float(getattr(self.cfg.wake, "single_flight_max_sec", 0.0) or 0.0))
+            self._round_end("逾時")
+            return False
+        return True
+
+    def _echo_muted(self) -> bool:
+        """喚醒閘：什麼時候「不要」做喚醒偵測。
+
+        三個來源都要擋：
+          ⓪ **single-flight**：已經有一輪在進行中（`wake.single_flight`）——
+             2026-09-27 使用者：「已經有其中一個被喚醒的就不要再喚醒，避免我在
+             講話的過程中又誤觸第二遍」。
           ① 正在播（`audio.output_busy()`）——可能是背景 thread 在播語音回報；
           ② 剛播完的殘響／裝置緩衝（`wake.echo_guard_sec` 秒內）。
 
-        不做的話它會把自己的提示音／TTS 收回來當成「hey hermes」→ 誤喚醒 →
+        不做 ①② 的話它會把自己的提示音／TTS 收回來當成「hey hermes」→ 誤喚醒 →
         再播一輪提示音 → 連響（2026-09-26 使用者回報的症狀）。
         """
+        if self._round_active():
+            return True
         if audio.output_busy():
             return True
         guard = float(getattr(self.cfg.wake, "echo_guard_sec", 0.0) or 0.0)
@@ -898,6 +936,13 @@ class VoiceDispatcher:
             _before = set()
 
         def _on_exit(_proc, log_file):
+            try:
+                _handle_exit(log_file)
+            finally:
+                # single-flight（spawn 回退路徑）：子程序結束＝這一輪收工。
+                self._round_end("派工程序結束")
+
+        def _handle_exit(log_file):
             text = dispatch.extract_stdout(log_file)
             if not text:
                 return
@@ -1144,10 +1189,15 @@ class VoiceDispatcher:
                     time.sleep(poll_interval)
 
             def _loop():
-                if _db_watch() is True:
-                    return
-                _thread_watch()
+                try:
+                    if _db_watch() is True:
+                        return
+                    _thread_watch()
+                finally:
+                    # single-flight：這一輪真的收工了才重新開放喚醒。
+                    self._round_end("結果監看結束")
 
+            self._round_handoff = True
             _th.Thread(target=_loop, daemon=True).start()
 
         # ── 派工方式 ──────────────────────────────────────────────────
@@ -1165,6 +1215,7 @@ class VoiceDispatcher:
             return
 
         try:
+            self._round_handoff = True   # 交棒：由 _on_exit 解鎖 single-flight
             dispatch.spawn_hermes(
                 prompt, self.cfg, thread_id, logger=log, on_exit=_on_exit,
                 heartbeat=_heartbeat,
@@ -1172,6 +1223,7 @@ class VoiceDispatcher:
             )
         except Exception as exc:  # noqa: BLE001 - 派工失敗要讓串內看得見
             log.error("派工失敗：%s", exc)
+            self._round_handoff = False
             try:
                 client.post_thread_message(
                     thread_id, f"⚠️ 派工失敗，請看 daemon log：{exc}"
@@ -1237,10 +1289,16 @@ class VoiceDispatcher:
         return 0
 
     def run_once(self) -> int:
-        """完整跑一輪 R1–R6（需要麥克風）。"""
+        """完整跑一輪 R1–R6（需要麥克風）。
+
+        single-flight：喚醒成功就鎖住閘門（`_round_begin`），一路到派工送出；
+        若派工路徑起了結果監看執行緒（`_round_handoff`），就由它收工時解鎖，
+        否則在這裡解鎖。這樣「講需求的過程」與「任務跑到回報完」都不會被二次喚醒。
+        """
         try:
             if not self.wait_for_wake():
                 return 0
+            self._round_begin()
             with audio.input_stream(self.cfg.audio) as stream:
                 transcript = self.record_and_confirm(stream)
             if not transcript:
@@ -1252,6 +1310,11 @@ class VoiceDispatcher:
         except Exception as exc:  # noqa: BLE001
             log.error("本輪執行失敗：%s", exc)
             return 1
+        finally:
+            # 交棒給監看執行緒的話由它解鎖；其他情形（沒聽到需求、失敗、
+            # 沒有監看的路徑）一律在這裡解鎖，避免永久鎖死叫不醒。
+            if not self._round_handoff:
+                self._round_end()
         return 0
 
     def run(self) -> int:

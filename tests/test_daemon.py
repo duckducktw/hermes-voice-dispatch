@@ -103,3 +103,35 @@ def test_no_speech_retries_when_explicitly_enabled(monkeypatch):
     )
     assert d.record_and_confirm(object()) is None
     assert calls == [0, 1, 2], "開啟重試時仍要用 max_retries"
+
+
+# ── single-flight：一輪進行中不再喚醒（2026-09-27 使用者要求）────────────
+def test_single_flight_blocks_second_wake():
+    d = VoiceDispatcher(Config(), dry_run=True)
+    assert d._echo_muted() is False
+    d._round_begin()
+    assert d._round_active() is True
+    assert d._echo_muted() is True          # 這一輪還在跑 → 不接受新喚醒
+    d._round_end()
+    assert d._round_active() is False
+    assert d._echo_muted() is False
+
+
+def test_single_flight_can_be_disabled():
+    cfg = Config()
+    cfg.wake.single_flight = False
+    d = VoiceDispatcher(cfg, dry_run=True)
+    d._round_begin()
+    assert d._round_active() is False
+    assert d._echo_muted() is False
+
+
+def test_single_flight_fuse_unlocks_after_timeout():
+    import time as _t
+    cfg = Config()
+    cfg.wake.single_flight_max_sec = 0.01
+    d = VoiceDispatcher(cfg, dry_run=True)
+    d._round_begin()
+    assert d._round_active() is True
+    _t.sleep(0.05)
+    assert d._round_active() is False       # 保險絲：逾時自動解鎖，不會叫不醒
