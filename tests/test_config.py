@@ -23,7 +23,7 @@ def test_defaults():
     assert cfg.discord.thread_name_limit == 100
     assert cfg.wake.mode == "openwakeword"   # 2026-09-26 定案：預設走波形判斷
     assert cfg.wake.oww_threshold == 0.85   # 強命中（單幀）
-    assert cfg.wake.oww_relaxed_threshold == 0.40  # 弱命中門檻
+    assert cfg.wake.oww_relaxed_threshold == 0.60  # 弱命中門檻（第四輪 0.40→0.60）
     assert cfg.wake.oww_relaxed_hits == 2
     assert cfg.wake.oww_window_frames == 6
 

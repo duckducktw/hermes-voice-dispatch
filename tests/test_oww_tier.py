@@ -7,6 +7,9 @@
        強命中：單幀 >= threshold（真命中 0.9x → 秒醒）
        弱命中：window_frames 幀內 >= relaxed_hits 幀 >= relaxed_threshold
      單一雜訊尖峰（一幀 0.4~0.85、鄰居都低）不再觸發。
+  4. 「看影片什麼都沒說就被回」→ 弱門檻 0.40 太寬（影片聲常態 0.40~0.69）→
+     **弱門檻 0.40 → 0.60**（真喊 0.85~0.97、弱喊 >=0.75，切在斷層上）。
+     → 本檔的 weak 測試值同步改成 0.65/0.70；並新增「0.4x 兩幀不再觸發」。
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ def _spotter_with_scores(monkeypatch, scores, **kw):
         str(MODEL),
         kw.get("threshold", 0.85),
         0.0,
-        relaxed_threshold=kw.get("relaxed", 0.40),
+        relaxed_threshold=kw.get("relaxed", 0.60),
         window_frames=kw.get("window", 6),
         relaxed_hits=kw.get("hits", 2),
     )
@@ -49,22 +52,29 @@ def test_strong_single_frame_fires_immediately(monkeypatch):
 
 
 def test_single_noise_spike_does_not_fire(monkeypatch):
-    """單一雜訊尖峰：一幀 0.60、鄰居 0.05 → 不該醒（第三輪「太鬆」的主因）。"""
-    scores = [0.05, 0.05, 0.60, 0.05, 0.05, 0.05, 0.05, 0.05]
+    """單一雜訊尖峰：一幀 0.70、鄰居 0.05 → 不該醒（第三輪「太鬆」的主因）。"""
+    scores = [0.05, 0.05, 0.70, 0.05, 0.05, 0.05, 0.05, 0.05]
     spotter = _spotter_with_scores(monkeypatch, scores)
     assert not any(_feed(spotter, len(scores)))
 
 
 def test_relaxed_two_frames_fire(monkeypatch):
-    """弱命中：視窗內兩幀 0.45（前後都有證據）→ 第二幀醒。"""
-    scores = [0.45, 0.50]
+    """弱命中：視窗內兩幀 0.65/0.70（前後都有證據）→ 第二幀醒。"""
+    scores = [0.65, 0.70]
     spotter = _spotter_with_scores(monkeypatch, scores)
     assert _feed(spotter, 2) == [False, True]
 
 
+def test_video_level_two_frames_no_longer_fire(monkeypatch):
+    """第四輪重點：影片聲常態 0.4x~0.5x，即使連兩幀也不再觸發（門檻 0.60）。"""
+    scores = [0.43, 0.50, 0.45, 0.52, 0.41, 0.48, 0.05, 0.05]
+    spotter = _spotter_with_scores(monkeypatch, scores)
+    assert not any(_feed(spotter, len(scores)))
+
+
 def test_relaxed_frames_outside_window_do_not_fire(monkeypatch):
     """兩次弱命中被拉開超過視窗（6 幀）→ 不該醒。"""
-    scores = [0.45] + [0.0] * 6 + [0.45] + [0.0] * 3
+    scores = [0.65] + [0.0] * 6 + [0.65] + [0.0] * 3
     spotter = _spotter_with_scores(monkeypatch, scores)
     assert not any(_feed(spotter, len(scores)))
 

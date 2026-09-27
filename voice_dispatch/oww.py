@@ -26,7 +26,7 @@ class OwwUnavailable(RuntimeError):
 class OwwSpotter:
     """以自訂 ONNX 模型偵測喚醒詞。
 
-    **判定規則（2026-09-27 第三輪修訂）＝ 雙層**：
+    **判定規則（2026-09-27 第四輪修訂）＝ 雙層**：
 
         強命中：任一幀 `score >= threshold`（單幀就成立）
         弱命中：最近 `window_frames` 幀內有 >= `relaxed_hits` 幀 `score >= relaxed_threshold`
@@ -35,8 +35,12 @@ class OwwSpotter:
     一兩幀；用來確認的「連續 N 幀」因此會殺掉正確命中）。可是純單幀低門檻又太鬆
     （雜訊/外洩語音只要一幀過 0.45 就醒）。所以：
       - 真命中 → 通常直接走「強命中」（0.9x）秒醒；
-      - 稍弱的真命中（0.5~0.8、但前後幀也偏高）→ 走「弱命中」仍會醒；
-      - 單一雜訊尖峰（只有一幀 0.45~0.75、鄰居都很低）→ **不再觸發**。
+      - 稍弱的真命中（0.7x、但前後幀也偏高）→ 走「弱命中」仍會醒；
+      - 單一雜訊尖峰（只有一幀 0.5~0.8、鄰居都很低）→ **不再觸發**。
+
+    `relaxed_threshold` 於 2026-09-27 由 0.40 提到 **0.60**：使用者「看影片什麼都
+    沒說就被回」，log 顯示影片聲常態落在 0.40~0.69、真喊 0.85~0.97 —— 0.60 切在
+    那道斷層上。
 
     命中後立即 reset，避免同一句話被重複喚醒。
     """
@@ -47,7 +51,7 @@ class OwwSpotter:
         threshold: float,
         vad_threshold: float = 0.0,
         logger=None,
-        relaxed_threshold: float = 0.40,
+        relaxed_threshold: float = 0.60,
         window_frames: int = 6,
         relaxed_hits: int = 2,
     ):

@@ -113,8 +113,16 @@ class WakeConfig:
     #       強命中：單幀 >= oww_threshold（真命中實測 0.94/0.96/0.97 → 秒醒）
     #       弱命中：oww_window_frames 幀內有 >= oww_relaxed_hits 幀 >= oww_relaxed_threshold
     #     單一雜訊尖峰（只有一幀 0.4~0.85、鄰居都低）→ 不再觸發。
+    # ⚠️ 2026-09-27（第四輪）使用者：「你不要把語音這麼寬鬆，我剛剛什麼都沒說、
+    #   只是看了影片你就回我」。log 鐵證：18:17:34 用 score=0.43 經**弱命中**
+    #   觸發（當時 oww_relaxed_threshold=0.40），而該時段環境最高分一路在 0.40~0.69，
+    #   全是影片聲。當天真命中是 0.85~0.97（唯一一次較低的真喊也 >= 0.75），
+    #   誤觸落在 0.40~0.52 → **中間有乾淨的斷層**。
+    #   → 把弱命中門檻 0.40 → 0.60（強命中 0.85 不動）。效果：
+    #       一幀 >= 0.85（真喊秒醒）或 480ms 內有 >= 2 幀 >= 0.60。
+    #     影片/環境聲的單幀尖峰（0.4~0.6）不再放行；0.75 級的真喊仍會過。
     oww_threshold: float = 0.85
-    oww_relaxed_threshold: float = 0.40
+    oww_relaxed_threshold: float = 0.60
     oww_relaxed_hits: int = 2
     oww_window_frames: int = 6
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。

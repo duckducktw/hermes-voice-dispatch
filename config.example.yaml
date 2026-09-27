@@ -61,10 +61,10 @@ wake:
   # **單幀尖峰**（0.938 也只維持 1 幀）→ 連續幀條件會殺掉正確命中。
   # 定案＝**雙層判定**（oww.OwwSpotter）：
   #   強命中（秒醒）：單幀 >= 0.85
-  #   弱命中：480ms 視窗內 >= 2 幀 >= 0.40（放行稍弱但前後有證據的真命中）
+  #   弱命中：480ms 視窗內 >= 2 幀 >= 0.60（放行稍弱但前後有證據的真命中）
   # 單一雜訊尖峰不再觸發。
   oww_threshold: 0.85
-  oww_relaxed_threshold: 0.40
+  oww_relaxed_threshold: 0.60
   oww_relaxed_hits: 2
   oww_window_frames: 6
   oww_vad_threshold: 0.0  # 0=關；>0 時使用 openWakeWord 內建 Silero VAD 閘控
