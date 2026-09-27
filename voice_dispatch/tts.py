@@ -324,26 +324,75 @@ def _gemini_api_key(cfg: Config) -> str:
     return ""
 
 
-def _gemini_write_audio(data: bytes, out_path: str) -> None:
-    """Gemini 有時回 WAV、有時回裸 PCM（24kHz s16le mono）→ 一律轉成 mp3。
+def _pcm_rate_from_mime(mime: str, default: int = 24000) -> int:
+    """從 mimeType 取裸 PCM 的取樣率，例如 "audio/L16;codec=pcm;rate=16000" → 16000。"""
+    m = re.search(r"rate\s*=\s*(\d+)", mime or "")
+    if not m:
+        return default
+    rate = int(m.group(1))
+    return rate if 8000 <= rate <= 48000 else default
 
-    只信 RIFF magic：實測 gemini-3.8 回真 WAV，gemini-3.1 回裸 PCM 但
-    mimeType 照樣寫 "audio/wav"（信 header 會踩雷，ffmpeg 直接 Invalid data）。
+
+def _sniff_container(data: bytes) -> Optional[List[str]]:
+    """嗅探常見容器 magic。回傳 ffmpeg 的輸入參數（讓它自己解），非容器回 None。
+
+    ⚠️ 這個嗅探是「爆音守門」的關鍵：把已壓縮的位元組（MP3/OGG/FLAC）硬當成
+    裸 PCM 餵給 ffmpeg，出來就是**全振幅白噪音**——就是使用者聽到的「唸到一半
+    突然超大聲沙」。所以任何認得出來的容器一律走 -i 讓 ffmpeg 自行判斷。
     """
-    if data[:4] == b"RIFF":
-        src, args = out_path + ".wav", ["-i", out_path + ".wav"]
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return []                      # WAV
+    if data[:4] == b"OggS":
+        return []                      # Ogg/Opus/Vorbis
+    if data[:4] == b"fLaC":
+        return []                      # FLAC
+    if data[:3] == b"ID3":
+        return []                      # MP3 with ID3
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return []                      # MPEG audio frame sync (裸 MP3/AAC-ADTS)
+    if data[4:8] == b"ftyp":
+        return []                      # MP4/M4A
+    return None
+
+
+def _gemini_write_audio(data: bytes, out_path: str, mime: str = "",
+                        logger=None) -> None:
+    """把 Gemini 回的音訊一律轉成 mp3。
+
+    格式判斷順序（2026-09-27 修正 — 原本只看 RIFF 會造成中途爆音）：
+      1. **容器嗅探**（WAV/Ogg/FLAC/MP3/MP4）→ 交給 ffmpeg 自己解。
+      2. 認不出容器才當裸 PCM，且**取樣率一律從 mimeType 取**
+         （`audio/L16;codec=pcm;rate=16000`），不再硬寫 24000。
+
+    為什麼不能只信 RIFF：實測 gemini-3.8 回真 WAV、gemini-3.1 回裸 PCM 但
+    mimeType 照樣寫 "audio/wav"。但**免費層每 model 每天只有 10 次配額**，
+    用完會自動輪替到下一顆 model，而不同 model 回的取樣率／容器不一樣。
+    舊碼把非 RIFF 的一切都當 24kHz s16le → 若實際是 16kHz 就變尖銳加速的
+    雜音、若實際是壓縮容器就變**全振幅白噪音**。長文分多段合成時只有換到
+    model 的那一段爆掉，聽起來就是「唸到一半突然超大聲沙」。
+    """
+    args = _sniff_container(data)
+    if args is not None:
+        src = out_path + ".src"
+        args = ["-i", src]
+        kind = "container"
     else:
         src = out_path + ".pcm"
-        args = ["-f", "s16le", "-ar", "24000", "-ac", "1", "-i", out_path + ".pcm"]
+        rate = _pcm_rate_from_mime(mime)
+        args = ["-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", src]
+        kind = f"raw pcm {rate}Hz"
     with open(src, "wb") as fh:
         fh.write(data)
     try:
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error"] + args + [out_path], check=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error"] + args + [out_path],
+                       check=True)
     finally:
         try:
             os.remove(src)
         except OSError:
             pass
+    if logger:
+        logger.info("TTS 解碼：%s（mime=%r，%d bytes）", kind, mime, len(data))
 
 
 def _apply_speed(path: str, speed: float, logger=None) -> None:
@@ -423,6 +472,65 @@ def normalise_pace(path: str, text: str, target_cps: float, logger=None) -> None
     _apply_speed(path, atempo, logger=None)
 
 
+#: 爆音判準的門檻（見 `_verdict_noise`）。實測值，別憑感覺改。
+NOISE_MAX_DBFS = -1.0     # 峰值頂到滿刻度才算可疑
+NOISE_CREST_DB = 12.0     # 波峰因數低於此＝訊號「密實」＝雜訊而非語音
+
+
+def _verdict_noise(vmax: float, vmean: float) -> bool:
+    """純函式判準：給 max/mean dBFS，回答「這是不是爆音雜訊」。
+
+    抽成純函式是為了能用**實測到的真實 dB 數值**做表格測試——合成訊號
+    （sine + tremolo）無法代理真人語音的動態，實測 crest 只有 6~7 dB，
+    會讓「不要誤殺大聲語音」的測試假性失敗。真人語音要靠實錄數值驗證。
+    """
+    return vmax >= NOISE_MAX_DBFS and (vmax - vmean) < NOISE_CREST_DB
+
+
+def _volume_stats(path: str):
+    """用 ffmpeg volumedetect 量 (max_dBFS, mean_dBFS)。量不到回 None。"""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", path, "-af", "volumedetect",
+             "-f", "null", "-"],
+            capture_output=True, text=True, check=True)
+    except Exception:  # noqa: BLE001 - 量不到就不做判斷（寧可放過也別誤殺）
+        return None
+    err = proc.stderr or ""
+    m_max = re.search(r"max_volume:\s*(-?[\d.]+) dB", err)
+    m_mean = re.search(r"mean_volume:\s*(-?[\d.]+) dB", err)
+    if not (m_max and m_mean):
+        return None
+    return float(m_max.group(1)), float(m_mean.group(1))
+
+
+def _is_noise_burst(path: str, logger=None) -> bool:
+    """判斷音檔是不是「全振幅白噪音」（解碼格式判錯的典型結果）。
+
+    為什麼需要（2026-09-27 使用者回報「唸到一半突然超大聲沙」）：把壓縮位元組
+    或錯取樣率的資料當裸 PCM 解，會得到接近滿刻度、且 RMS 貼著峰值的訊號。
+    人聲相反——峰值高但 RMS 低（波峰因數大，因為字與字之間有安靜段落）。
+
+    門檻怎麼定的（2026-09-27 實測 ffmpeg volumedetect）：
+        MP3 當裸 PCM 解     max   0.0 / mean  -6.6 → crest  6.6  ← 真正的 bug
+        白噪音 a=0.99       max   0.0 / mean  -9.3 → crest  9.3
+        真人語音（原始）     max  -5.3 / mean -23.1 → crest 17.8  ✅ 不誤殺
+        真人語音（推到滿刻度）max   0.0 / mean -14.3 → crest 14.3  ✅ 不誤殺
+        正弦波              max -18.5 / mean -21.5 → crest  3.0（靠 max 排除）
+    所以 crest 門檻取 12：夾在爆音 9.3 與真人語音 14.3 之間。
+    **別調回 6.0** —— 實測爆音是 6.6，設 6.0 整個守門會失效（第一版的錯）。
+    """
+    stats = _volume_stats(path)
+    if stats is None:
+        return False
+    vmax, vmean = stats
+    noisy = _verdict_noise(vmax, vmean)
+    if logger and noisy:
+        logger.warning("偵測到爆音／雜訊：max=%.1f dB mean=%.1f dB crest=%.1f dB",
+                       vmax, vmean, vmax - vmean)
+    return noisy
+
+
 def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> str:
     """用 Google Gemini TTS 合成（比 edge-tts 更像真人，且能演出「商業大佬」口吻）。
 
@@ -480,13 +588,20 @@ def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> 
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = _json.load(resp)
-                data = base64.b64decode(
-                    payload["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                )
+                _inline = payload["candidates"][0]["content"]["parts"][0]["inlineData"]
+                data = base64.b64decode(_inline["data"])
+                mime = _inline.get("mimeType", "") or ""
             except Exception as exc:  # noqa: BLE001 - 配額/網路/格式 → 換下一顆 model
                 last_err = exc
                 break
-            _gemini_write_audio(data, out_path)
+            _gemini_write_audio(data, out_path, mime=mime, logger=logger)
+            # 爆音守門：解碼錯把壓縮位元組當裸 PCM 會變全振幅白噪音（使用者回報
+            # 「唸到一半突然超大聲沙」）。用峰值／RMS 抓，壞了就換下一顆 model。
+            if _is_noise_burst(out_path, logger=logger):
+                last_err = RuntimeError(f"解碼出雜訊（mime={mime!r}）")
+                if logger:
+                    logger.warning("Gemini TTS 輸出疑似雜訊（mime=%r）→ 換下一顆 model", mime)
+                break
             # 品質守門：Gemini 偶爾會把「# 風格指示」也當台詞唸出來。
             # 實測 26 字的句子正常約 4.6~6.6s；唸出指示會變成 15.3s（字/秒 掉到 1.7）。
             cps = _cps(out_path, n_chars)
