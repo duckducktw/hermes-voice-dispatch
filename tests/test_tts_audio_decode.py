@@ -126,3 +126,73 @@ def test_verdict_noise_matches_measured_reality(label, vmax, vmean, expect_noise
 def test_noise_thresholds_sit_between_burst_and_speech():
     """門檻必須夾在「爆音 9.3」與「真人語音 14.3」之間，否則守門失效或誤殺。"""
     assert 9.3 < tts.NOISE_CREST_DB < 14.3
+
+
+# ── 2026-09-27 第二輪（使用者回報「還是會」爆音後補的兩個真 bug）────────────
+
+def test_edge_fallback_never_uses_gemini_voice():
+    """Gemini 配額用完退回 edge-tts 時，不能把 Gemini 聲音名傳給 edge_tts。
+
+    實測：edge_tts 收到 "Charon" 會 `ValueError: Invalid voice 'Charon'`，
+    整段合成直接被打掉 → **備援路徑等於不存在**。
+    """
+    class _T:
+        voice = "Charon"
+        edge_voice = ""
+
+    class _C:
+        tts = _T()
+
+    picked = tts._edge_voice(_C())
+    assert picked not in tts.GEMINI_VOICES
+    assert "-" in picked          # edge 的聲音名是 locale 式（zh-TW-XxxNeural）
+
+
+def test_edge_voice_respects_explicit_and_passthrough():
+    class _T:
+        voice = "Charon"
+        edge_voice = "zh-CN-XiaoxiaoNeural"
+
+    class _C:
+        tts = _T()
+    assert tts._edge_voice(_C()) == "zh-CN-XiaoxiaoNeural"   # 明確指定優先
+
+    class _T2:
+        voice = "zh-TW-HsiaoChenNeural"
+        edge_voice = ""
+
+    class _C2:
+        tts = _T2()
+    assert tts._edge_voice(_C2()) == "zh-TW-HsiaoChenNeural"  # 本來就是 edge 名 → 沿用
+
+
+@needs_ffmpeg
+def test_limit_peaks_removes_intersample_overshoot(tmp_path):
+    """限幅要把過衝壓到 0 dBFS 以下。
+
+    實測坑：只掛 alimiter 不夠（真實 TTS 檔 +1.99 dB 只降到 +0.84 dB），因為 mp3
+    有損重編碼自己會產生新的過衝 → 必須先靜態降增益再限幅。
+
+    造素材的坑：乾淨 sine 就算 volume=6dB 也不會過衝（編碼器有餘裕，實測 -12 dB）。
+    要逼出 inter-sample overshoot 得用**寬頻訊號 + 硬限幅 + 重取樣**。
+    """
+    import re
+
+    def peak(p):
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-i", p, "-af",
+                            "astats=metadata=1:reset=0", "-f", "null", "-"],
+                           capture_output=True, text=True)
+        vals = [float(x) for x in re.findall(r"Peak level dB:\s*(-?[\d.]+)", r.stderr)]
+        return max(vals) if vals else -99.0
+
+    loud = str(tmp_path / "loud.mp3")
+    _ff("-f", "lavfi", "-i", "anoisesrc=d=2:a=0.9:c=pink",
+        "-af", "volume=12dB,alimiter=limit=1.0:level=false,atempo=1.3",
+        "-ar", "24000", "-ac", "1", "-b:a", "128k", loud)
+
+    before = peak(loud)
+    tts._limit_peaks(loud)
+    after = peak(loud)
+    # 不論素材是否恰好過衝，限幅後都必須安全地低於 0 dBFS
+    assert after <= 0.0, f"限幅後仍過衝（{after:+.2f} dB）→ 播放端會削波爆音"
+    assert after < before, f"限幅沒起作用（{before:+.2f} → {after:+.2f}）"

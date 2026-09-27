@@ -277,6 +277,12 @@ class TtsConfig:
     # voice 兩引擎共用：engine="edge" 時是 edge 聲音名（zh-CN-XiaoxiaoNeural）；
     # engine="gemini" 時是 Gemini prebuilt 聲音名（Charon／Orus／Alnilam／Algenib…）。
     voice: str = "zh-CN-XiaoyiNeural"
+    # 退回 edge-tts 時用的聲音名（留空＝自動判斷）。
+    # 為什麼要獨立一個鍵（2026-09-27 實測）：上面的 voice 兩引擎共用，設 gemini 時
+    # 填的是 "Charon" 這種 Gemini prebuilt 名。Gemini 配額用完退回 edge-tts 時，
+    # edge_tts 會 `ValueError: Invalid voice 'Charon'` 直接把整段合成打掉——
+    # **備援路徑等於不存在**。留空時 tts._edge_voice() 會自動換成 edge 能用的名字。
+    edge_voice: str = ""
     # ── engine="gemini" 專用（2026-09-26 使用者：「我要更像真人，那種商業大佬的感覺」）──
     # 風格指示：**必須**用「# 風格指示 / # 台詞」分節寫進 prompt，模型才會只唸台詞
     # （寫成「請用…口吻說出：」會被連指示一起唸出來，實測 5.3s → 14.1s）。

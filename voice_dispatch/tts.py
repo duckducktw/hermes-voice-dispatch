@@ -472,6 +472,36 @@ def normalise_pace(path: str, text: str, target_cps: float, logger=None) -> None
     _apply_speed(path, atempo, logger=None)
 
 
+def _limit_peaks(path: str, logger=None) -> None:
+    """把超過 0 dBFS 的過衝壓回來，避免播放端削波爆裂聲。
+
+    為什麼需要（2026-09-27 實測）：Gemini 有些段落本身就貼著滿刻度（max 0.0 dBFS），
+    再經 `atempo` 重新取樣 + mp3 重編碼，峰值會**衝過 0 dBFS**——實測 astats
+    量到 `Peak level dB: +1.99`。超過滿刻度的樣本在播放時被硬截平，就是短促的
+    「啪／沙」爆裂聲。這跟 `_is_noise_burst` 抓的「整段白噪音」是**不同的故障**：
+    前者是瞬間削波（Flat factor 0、Abs Peak count 少），後者是整段訊號都壞掉。
+
+    用 alimiter 做真峰限制。**注意**：只掛 alimiter 不夠——實測 +1.99 dB 的檔
+    只降到 +0.84 dB，因為 mp3 有損重編碼本身會再產生新的過衝（解碼後的波形不等於
+    編碼前）。所以先用 `volume` 靜態降 3 dB 給重編碼留餘裕，再用 alimiter 壓真峰。
+    """
+    tmp = path + ".lim.mp3"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+             # -3dB 預降（給 mp3 重編碼的過衝留餘裕）→ 真峰限到 -3 dBFS
+             "-af", "volume=-3dB,alimiter=limit=0.708:level=false",
+             "-b:a", "128k", tmp],
+            check=True)
+    except Exception as exc:  # noqa: BLE001 - 限幅失敗不該擋住播放
+        if logger:
+            logger.warning("峰值限幅失敗（%s）→ 用原檔", exc)
+        return
+    os.replace(tmp, path)
+    if logger:
+        logger.info("TTS 峰值限幅：預降 3 dB + 真峰限至 -3 dBFS（避免播放削波）")
+
+
 #: 爆音判準的門檻（見 `_verdict_noise`）。實測值，別憑感覺改。
 NOISE_MAX_DBFS = -1.0     # 峰值頂到滿刻度才算可疑
 NOISE_CREST_DB = 12.0     # 波峰因數低於此＝訊號「密實」＝雜訊而非語音
@@ -691,6 +721,38 @@ def _concat_audio(parts: List[str], out_path: str, logger=None) -> None:
         logger.info("TTS 分段合成：%d 段 → 合併成一個檔", len(parts))
 
 
+#: Gemini 的 prebuilt 聲音名（`tts.voice` 用這些時，edge-tts 不認得）。
+GEMINI_VOICES = frozenset({
+    "Charon", "Orus", "Alnilam", "Algenib", "Puck", "Kore", "Fenrir", "Aoede",
+    "Leda", "Zephyr", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina",
+    "Erinome", "Rasalgethi", "Laomedeia", "Achernar", "Achird", "Sadachbia",
+    "Schedar", "Gacrux", "Pulcherrima", "Zubenelgenubi", "Vindemiatrix",
+    "Sadaltager", "Sulafat", "Callirrhoe", "Autonoe",
+})
+
+#: `tts.voice` 是 Gemini 聲音名時，退回 edge-tts 要改用的預設聲音。
+DEFAULT_EDGE_VOICE = "zh-TW-YunJheNeural"
+
+
+def _edge_voice(cfg: Config) -> str:
+    """挑 edge-tts 能用的聲音名。
+
+    為什麼需要（2026-09-27 實測）：`tts.voice` 兩引擎共用，設 gemini 時填的是
+    Gemini prebuilt 名（例如 "Charon"）。Gemini 配額用完退回 edge-tts 時，
+    edge_tts 會直接 `ValueError: Invalid voice 'Charon'` 把整段合成打掉——
+    **備援路徑等於不存在**。所以要在這裡換成 edge 的聲音名。
+
+    優先序：`tts.edge_voice`（明確指定）→ `tts.voice`（若不是 Gemini 名）→ 內建預設。
+    """
+    explicit = (getattr(cfg.tts, "edge_voice", "") or "").strip()
+    if explicit:
+        return explicit
+    voice = (getattr(cfg.tts, "voice", "") or "").strip()
+    if voice and voice not in GEMINI_VOICES and "-" in voice:
+        return voice          # 看起來是 edge 的 locale 式聲音名（zh-TW-XxxNeural）
+    return DEFAULT_EDGE_VOICE
+
+
 def _synth_one(text: str, out_path: str, cfg: Config, engine: str, logger=None) -> None:
     """合成單一段落（gemini 失敗自動退回 edge-tts）。"""
     if engine == "gemini":
@@ -700,7 +762,10 @@ def _synth_one(text: str, out_path: str, cfg: Config, engine: str, logger=None) 
         except Exception as exc:  # noqa: BLE001 - 退回 edge-tts
             if logger:
                 logger.warning("Gemini TTS 失敗（%s）→ 退回 edge-tts", exc)
-    synth_to_file(text, out_path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+    voice = _edge_voice(cfg)
+    if logger:
+        logger.info("TTS 合成（edge-tts，voice=%s）", voice)
+    synth_to_file(text, out_path, voice, getattr(cfg.tts, "rate", ""))
 
 
 def _apply_pace(path: str, text: str, cfg: Config, logger=None) -> None:
@@ -807,6 +872,17 @@ def speak(text: str, cfg: Config, logger=None) -> bool:
                 os.remove(p)
             except OSError:
                 pass
+    # 播放前做兩件事（2026-09-27 使用者回報「還是會」爆音後補上）：
+    #   1. 真峰限幅 → 擋掉 atempo/mp3 重編碼造成的過衝削波（實測 +1.99 dBFS）。
+    #   2. 留下電平診斷 → 下次真的爆音時，log 直接有現場數據可比對，不用重現。
+    _limit_peaks(path, logger=logger)
+    if logger:
+        stats = _volume_stats(path)
+        if stats:
+            vmax, vmean = stats
+            logger.info("TTS 播放前電平：max=%.1f dB mean=%.1f dB crest=%.1f dB（%.1fs）%s",
+                        vmax, vmean, vmax - vmean, _duration(path),
+                        "  ⚠️疑似雜訊" if _verdict_noise(vmax, vmean) else "")
     try:
         return audio.play_file(path, cfg.audio, logger=logger)
     finally:
