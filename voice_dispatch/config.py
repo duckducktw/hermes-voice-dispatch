@@ -54,10 +54,16 @@ class AudioConfig:
     recover_reset_healthy_sec: float = 180.0
     status_file: str = "~/.local/state/hermes-voice-dispatch/mic-status.json"
     # 播放器候選，依序嘗試（會用 shlex 拆成 argv，{file} 由檔名取代）
+    # 播放器候選（依序嘗試）。**每一個都必須真的支援 mp3**。
+    # 2026-09-28 教訓：清單裡原本有 `aplay -q {file}`。aplay 只吃 WAV／裸 PCM，
+    # 餵 mp3 給它不會「播不出來」，而是把壓縮位元組當樣本播出去＝**全振幅白噪音**。
+    # 配上原本寫死的 60 秒播放逾時，95 秒的長語音播到一半被砍 → 退到 aplay → 爆音。
+    # 現在 audio._play_file_inner() 有安全閥會擋（非 WAV 不餵 PCM-only 播放器），
+    # 但清單本身也別再放 aplay。ffmpeg 的 -f alsa 走 libmp3lame 解碼，是安全的備援。
     players: List[str] = field(default_factory=lambda: [
         "ffplay -nodisp -autoexit -loglevel quiet {file}",
-        "paplay {file}",
-        "aplay -q {file}",
+        "mpv --no-video --really-quiet {file}",
+        "ffmpeg -loglevel quiet -i {file} -f alsa default",
     ])
 
 

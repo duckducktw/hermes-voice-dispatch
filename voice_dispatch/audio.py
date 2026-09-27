@@ -8,6 +8,7 @@ sounddevice 需要系統的 PortAudio 原生函式庫；若缺少會在 import �
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 import threading
@@ -328,11 +329,59 @@ def play_file(path: str, cfg: AudioConfig, logger=None) -> bool:
         return _play_file_inner(path, cfg, logger)
 
 
+#: 只吃裸 PCM／WAV 的播放器。**絕不能**餵 mp3 給它們。
+_PCM_ONLY_PLAYERS = ("aplay", "arecord")
+
+#: WAV 容器的 magic。
+_WAV_MAGIC = (b"RIFF", b"WAVE")
+
+
+def _is_wav(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return False
+    return head[:4] == _WAV_MAGIC[0] and head[8:12] == _WAV_MAGIC[1]
+
+
+def _playback_timeout(path: str) -> float:
+    """依音檔長度算播放逾時（絕不能是固定值）。
+
+    為什麼（2026-09-28 使用者第三次回報「還是會」爆音後查到的真因）：
+    原本寫死 `timeout=60`，但長回報的語音實測 **95 秒** → ffplay 播到第 60 秒
+    被 SIGKILL → 被當成「這個播放器失敗」→ 往下退到 `paplay`（不支援 mp3、失敗）
+    → 再退到 **`aplay -q`，它把 mp3 位元組當裸 PCM 推給音效卡＝全振幅白噪音**。
+    使用者聽到的就是「唸到一半突然超大聲沙」——檔案本身完全乾淨
+    （實測 max -3.8 dB / crest 19.7），問題全在播放端。
+
+    所以逾時 = 音檔長度 + 30 秒緩衝，至少 60 秒。
+    """
+    dur = 0.0
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, check=True).stdout.strip()
+        dur = float(out)
+    except Exception:  # noqa: BLE001 - 量不到就用保守值
+        dur = 0.0
+    return max(60.0, dur + 30.0)
+
+
 def _play_file_inner(path: str, cfg: AudioConfig, logger=None) -> bool:
+    timeout = _playback_timeout(path)
+    is_wav = _is_wav(path)
     for tmpl in cfg.players:
         # 先用 shlex 拆成 argv，再把 {file} 佔位符換成實際路徑（保證含空白路徑也正確）
         argv = [part.replace("{file}", path) for part in shlex.split(tmpl)]
         if not argv:
+            continue
+        # ⚠️ 安全閥：絕不把非 WAV（mp3 等）餵給只吃 PCM 的播放器。
+        # aplay 會把壓縮位元組當樣本播出去 → 全振幅白噪音（不是「播不出來」而是「爆音」）。
+        if os.path.basename(argv[0]) in _PCM_ONLY_PLAYERS and not is_wav:
+            if logger:
+                logger.debug("跳過 %s：它只吃 WAV／裸 PCM，餵 mp3 會變雜訊", argv[0])
             continue
         try:
             proc = subprocess.run(
@@ -340,7 +389,7 @@ def _play_file_inner(path: str, cfg: AudioConfig, logger=None) -> bool:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=60,
+                timeout=timeout,
             )
             if proc.returncode == 0:
                 return True
@@ -348,6 +397,13 @@ def _play_file_inner(path: str, cfg: AudioConfig, logger=None) -> bool:
                 logger.debug("播放器 %s 失敗（rc=%s）：%s",
                              argv[0], proc.returncode,
                              (proc.stderr or b"").decode("utf-8", "replace"))
+        except subprocess.TimeoutExpired:
+            # 逾時代表「播到一半被砍」，**不是**這個播放器不支援格式。
+            # 繼續往下退只會用更爛的播放器把同一段音訊再播壞一次 → 直接放棄。
+            if logger:
+                logger.warning("播放器 %s 逾時（%.0fs）→ 中止播放，不退到其他播放器",
+                               argv[0], timeout)
+            return False
         except FileNotFoundError:
             continue  # 這個播放器沒安裝，試下一個
         except Exception as exc:  # noqa: BLE001

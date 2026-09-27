@@ -18,6 +18,12 @@ import pytest
 
 from voice_dispatch import audio
 
+#: `_play_file_inner` 的真實實作。autouse fixture 會把模組屬性換成 no-op，
+#: 但要**測那個函式本身的邏輯**（播放器退階、逾時、格式安全閥）就得拿到真貨。
+#: 用法：`from tests.conftest import REAL_PLAY_FILE_INNER`，再自己 mock
+#: `audio.subprocess.run` 攔住真正的 spawn（這樣一樣不會出聲）。
+REAL_PLAY_FILE_INNER = audio._play_file_inner
+
 
 @pytest.fixture(autouse=True)
 def _never_play_real_audio(monkeypatch):
