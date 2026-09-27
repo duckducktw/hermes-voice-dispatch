@@ -40,9 +40,9 @@ def _read_pcm16(path: Path) -> np.ndarray:
 
 
 def test_hey_hermes_corpus_audio_triggers():
-    """真實語料中的 Hey Hermes 應通過 0.6 / 連續三幀確認。"""
+    """真實語料中的 Hey Hermes 應觸發（雙層判定：強命中 0.6 或弱命中）。"""
     samples = _read_pcm16(_require_model_and_corpus())
-    spotter = OwwSpotter(str(MODEL), threshold=0.6, confirmation_frames=3)
+    spotter = OwwSpotter(str(MODEL), threshold=0.6)
     assert any(spotter.feed(samples[i:i + 1024]) for i in range(0, len(samples), 1024))
 
 
@@ -50,7 +50,7 @@ def test_silence_and_noise_do_not_trigger():
     """靜音與中等強度白雜訊不可觸發。"""
     if not MODEL.is_file():
         pytest.skip("需要本機 hey_hermes openWakeWord 模型")
-    spotter = OwwSpotter(str(MODEL), threshold=0.6, confirmation_frames=3)
+    spotter = OwwSpotter(str(MODEL), threshold=0.6)
     silence = np.zeros(16000, dtype=np.int16)
     assert not any(spotter.feed(silence[i:i + 1024]) for i in range(0, len(silence), 1024))
     spotter.reset()
@@ -62,4 +62,4 @@ def test_silence_and_noise_do_not_trigger():
 def test_missing_model_is_reported(tmp_path):
     """模型缺失時讓 daemon 可捕捉 OwwUnavailable 並回退，不在初始化時 crash。"""
     with pytest.raises(OwwUnavailable):
-        OwwSpotter(str(tmp_path / "missing.onnx"), 0.6, 3)
+        OwwSpotter(str(tmp_path / "missing.onnx"), 0.6)

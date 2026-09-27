@@ -22,8 +22,10 @@ def test_defaults():
     assert cfg.discord.auto_archive_duration == 1440
     assert cfg.discord.thread_name_limit == 100
     assert cfg.wake.mode == "openwakeword"   # 2026-09-26 定案：預設走波形判斷
-    assert cfg.wake.oww_threshold == 0.45  # 2026-09-27：房間分數低，放寬避免叫不醒
-    assert cfg.wake.oww_confirmation_frames == 1  # 單幀尖峰模型，>1 會殺掉正確命中
+    assert cfg.wake.oww_threshold == 0.85   # 強命中（單幀）
+    assert cfg.wake.oww_relaxed_threshold == 0.40  # 弱命中門檻
+    assert cfg.wake.oww_relaxed_hits == 2
+    assert cfg.wake.oww_window_frames == 6
 
 
 def test_openwakeword_yaml_override(tmp_path):
@@ -33,7 +35,9 @@ def test_openwakeword_yaml_override(tmp_path):
         "  mode: openwakeword\n"
         "  oww_model: /tmp/hey_hermes.onnx\n"
         "  oww_threshold: 0.7\n"
-        "  oww_confirmation_frames: 4\n"
+        "  oww_relaxed_threshold: 0.35\n"
+        "  oww_relaxed_hits: 3\n"
+        "  oww_window_frames: 8\n"
         "  oww_vad_threshold: 0.25\n",
         encoding="utf-8",
     )
@@ -41,7 +45,9 @@ def test_openwakeword_yaml_override(tmp_path):
     assert cfg.wake.mode == "openwakeword"
     assert cfg.wake.oww_model == "/tmp/hey_hermes.onnx"
     assert cfg.wake.oww_threshold == 0.7
-    assert cfg.wake.oww_confirmation_frames == 4
+    assert cfg.wake.oww_relaxed_threshold == 0.35
+    assert cfg.wake.oww_relaxed_hits == 3
+    assert cfg.wake.oww_window_frames == 8
     assert cfg.wake.oww_vad_threshold == 0.25
 
 

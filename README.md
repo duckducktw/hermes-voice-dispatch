@@ -195,7 +195,7 @@ journalctl --user -u voice-dispatch.service -f
 | Discord 429 | 觸發速率限制，log 會顯示 `retry_after`；稍後再試。 |
 | 討論串名稱被截斷 | Discord thread 名上限 100 字元，屬正常行為。 |
 | **語音回報只唸一半就停** | 兩種成因：<br>(1) `tts.speak_result_max_chars` 為正數 → 只唸前 N 字。**0＝完整唸完**（預設）。<br>(2) Gemini TTS 單次輸出有音訊長度上限，長文會被**截斷**（實測 2000 字只出 104s＝18 字/秒，根本不可能）。tts 會依 `tts.speak_chunk_chars`（預設 240）分段合成再接起來，並用「合成後字/秒 ≫ 目標」自動偵測截斷、切半重合成。診斷：`tools/probe_speak_pipeline.py 1500`。 |
-| 喚醒叫不醒 | 看 log 的 `openWakeWord 觀測：近 5 秒最高分 X、最長連續 N 幀`：<br>(a) X 不夠高 → 降 `wake.oww_threshold`（現 0.45，房間實測 0.30~0.44）。<br>(b) X 夠高但 N < 需求 → 降 `wake.oww_confirmation_frames`。⚠️ **這顆模型的分数是單幀尖峰**（實測 0.938 也只維持 1 幀），所以 frames **只能是 1**，設 >1 會把正確命中丟掉。<br>(c) X < 0.05 → 音訊沒進模型（裝置／音量／取樣率）。 |
+| 喚醒叫不響／太鬆（誤喚醒） | 判定是**雙層**（`oww.OwwSpotter`）：強命中＝單幀 ≥ `wake.oww_threshold`（現 0.85，真命中實測 0.94/0.96/0.97）；弱命中＝`wake.oww_window_frames` 幀內 ≥ `wake.oww_relaxed_hits` 幀 ≥ `wake.oww_relaxed_threshold`（現 0.40 x2 / 6 幀）。<br>看 log 的 `openWakeWord 觀測：近 5 秒最高分 X、連續過強門檻 N 幀、弱命中 M 幀`：<br>(a) X 衝得上去但沒醒 → 弱命中也沒滿足 → 降 `oww_relaxed_threshold` 或 `oww_relaxed_hits`。<br>(b) 太鬆 → 升 `oww_threshold`（單幀就放行的門檻）或升 `oww_relaxed_threshold`。<br>⚠️ **不要用「連續 N 幀」條件**：這顆 model 的分數是單幀尖峰（實測 0.938 只維持 1 幀），連續幀會殺掉正確命中。<br>(c) X < 0.05 → 音訊沒進模型（裝置／音量／取樣率）。 |
 | 派工沒動靜 | 看 `dispatch.log_dir` 下的 `dispatch-*.log`；確認 `hermes` 在 PATH。 |
 
 ---

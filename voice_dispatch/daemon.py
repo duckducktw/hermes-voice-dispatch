@@ -290,20 +290,24 @@ class VoiceDispatcher:
             wake_detect = oww.OwwSpotter(
                 self.cfg.wake.oww_model,
                 self.cfg.wake.oww_threshold,
-                self.cfg.wake.oww_confirmation_frames,
                 self.cfg.wake.oww_vad_threshold,
                 logger=log,
+                relaxed_threshold=self.cfg.wake.oww_relaxed_threshold,
+                window_frames=self.cfg.wake.oww_window_frames,
+                relaxed_hits=self.cfg.wake.oww_relaxed_hits,
             )
         except oww.OwwUnavailable:
             log.warning("openWakeWord 不可用，回退 wake.mode=kws 的既有串接引擎。")
             return self._wait_for_wake_kws()
 
         threshold_in_use = float(self.cfg.wake.oww_threshold)
-        need_frames = int(self.cfg.wake.oww_confirmation_frames)
+        relaxed_in_use = float(self.cfg.wake.oww_relaxed_threshold)
+        hits_needed = int(self.cfg.wake.oww_relaxed_hits)
         while not self._stop:
             frozen = {"hit": False, "blocks": 0}
             peak_since = 0.0
-            streak_since = 0          # 這個觀測窗內「連續過門檻」的最長幀數
+            streak_since = 0          # 這個觀測窗內「連續過強門檻」的最長幀數
+            relaxed_since = 0         # 這個觀測窗內「過弱門檻」的最多幀數（視窗內）
             last_report = time.time()
             with audio.input_stream(self.cfg.audio) as stream:
                 self._log_stream_health(stream)
@@ -341,15 +345,18 @@ class VoiceDispatcher:
                     if wake_detect.latest_score > peak_since:
                         peak_since = wake_detect.latest_score
                     streak_since = max(streak_since, wake_detect.consecutive_frames)
+                    relaxed_since = max(relaxed_since, wake_detect.relaxed_count())
                     if time.time() - last_report >= 5.0:
                         if peak_since >= 0.05:
                             log.info(
-                                "openWakeWord 觀測：近 5 秒最高分 %.3f、最長連續 %d 幀"
-                                "（門檻 %.2f / 需 %d 幀）",
-                                peak_since, streak_since, threshold_in_use, need_frames,
+                                "openWakeWord 觀測：近 5 秒最高分 %.3f、連續過強門檻 %d 幀、"
+                                "弱命中 %d 幀（強門檻 %.2f；弱 %.2f x%d 幀）",
+                                peak_since, streak_since, relaxed_since,
+                                threshold_in_use, relaxed_in_use, hits_needed,
                             )
                         peak_since = 0.0
                         streak_since = 0
+                        relaxed_since = 0
                         last_report = time.time()
                 if frozen["hit"]:
                     log.warning("擷取串流凍結（連續 %d 個區塊位元完全相同）→ mic 掛了",

@@ -1,14 +1,16 @@
 """openWakeWord 的 Hermes 喚醒詞包裝。
 
 daemon 的音訊串流是 16 kHz / mono / int16，每次 1024 samples；openWakeWord
-則以 80 ms（1280 samples）為最佳推論單位。本模組負責重新切塊、連續幀確認與
-重置，讓呼叫端只要一直餵 daemon 的原始 block 即可。
+則以 80 ms（1280 samples）為最佳推論單位。本模組負責重新切塊、雙層命中判定
+（強命中＝單幀過高門檻；弱命中＝短視窗內多幀過低門檻）與重置，讓呼叫端只要
+一直餵 daemon 的原始 block 即可。
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -24,25 +26,40 @@ class OwwUnavailable(RuntimeError):
 class OwwSpotter:
     """以自訂 ONNX 模型偵測喚醒詞。
 
-    ``feed()`` 回傳 ``True`` 前，必須收到連續 ``confirmation_frames`` 個分數
-    大於等於 ``threshold`` 的 80 ms 音訊幀。命中後立即 reset，避免同一句話被
-    重複喚醒。
+    **判定規則（2026-09-27 第三輪修訂）＝ 雙層**：
+
+        強命中：任一幀 `score >= threshold`（單幀就成立）
+        弱命中：最近 `window_frames` 幀內有 >= `relaxed_hits` 幀 `score >= relaxed_threshold`
+
+    為什麼要雙層：這顆 model 的分數是**單幀尖峰**（真命中會衝到 0.9x，但常常只有
+    一兩幀；用來確認的「連續 N 幀」因此會殺掉正確命中）。可是純單幀低門檻又太鬆
+    （雜訊/外洩語音只要一幀過 0.45 就醒）。所以：
+      - 真命中 → 通常直接走「強命中」（0.9x）秒醒；
+      - 稍弱的真命中（0.5~0.8、但前後幀也偏高）→ 走「弱命中」仍會醒；
+      - 單一雜訊尖峰（只有一幀 0.45~0.75、鄰居都很低）→ **不再觸發**。
+
+    命中後立即 reset，避免同一句話被重複喚醒。
     """
 
     def __init__(
         self,
         model_path: str,
         threshold: float,
-        confirmation_frames: int,
         vad_threshold: float = 0.0,
         logger=None,
+        relaxed_threshold: float = 0.40,
+        window_frames: int = 6,
+        relaxed_hits: int = 2,
     ):
         self._log = logger or logging.getLogger(__name__)
         self.model_path = os.path.expanduser(model_path)
         self.threshold = float(threshold)
-        self.confirmation_frames = max(1, int(confirmation_frames))
+        self.relaxed_threshold = float(relaxed_threshold)
+        self.window_frames = max(1, int(window_frames))
+        self.relaxed_hits = max(1, int(relaxed_hits))
         self.vad_threshold = float(vad_threshold)
         self._buffer = np.zeros(0, dtype=np.int16)
+        self._recent: deque = deque(maxlen=self.window_frames)
         self.consecutive_frames = 0
         self.latest_score = 0.0
         self.peak_score = 0.0
@@ -71,10 +88,12 @@ class OwwSpotter:
             raise OwwUnavailable(message) from exc
 
         self._log.info(
-            "喚醒詞引擎：openWakeWord（%s，門檻 %.2f，連續 %d 幀，VAD %.2f）",
+            "喚醒詞引擎：openWakeWord（%s，強命中門檻 %.2f；弱命中 %.2f x%d 幀 / %d 幀視窗；VAD %.2f）",
             self.model_names,
             self.threshold,
-            self.confirmation_frames,
+            self.relaxed_threshold,
+            self.relaxed_hits,
+            self.window_frames,
             self.vad_threshold,
         )
 
@@ -97,6 +116,10 @@ class OwwSpotter:
         predictions = self._model.predict(frame)
         return max((float(score) for score in predictions.values()), default=0.0)
 
+    def relaxed_count(self) -> int:
+        """目前視窗內有幾幀 >= relaxed_threshold（觀測用）。"""
+        return sum(1 for s in self._recent if s >= self.relaxed_threshold)
+
     def feed(self, block: np.ndarray) -> bool:
         """餵入 16 kHz / mono / int16 音訊 block；確認命中時回傳 ``True``。"""
         pcm = self._to_pcm16(block)
@@ -118,7 +141,11 @@ class OwwSpotter:
                 self.consecutive_frames += 1
             else:
                 self.consecutive_frames = 0
-            if self.consecutive_frames >= self.confirmation_frames:
+            self._recent.append(score)
+
+            strong = score >= self.threshold
+            relaxed = self.relaxed_count() >= self.relaxed_hits
+            if strong or relaxed:
                 score_at_hit = self.latest_score
                 self.reset()
                 self.latest_score = score_at_hit
@@ -128,6 +155,7 @@ class OwwSpotter:
     def reset(self) -> None:
         """清空音訊/分數狀態，回到可偵測下一次喚醒的狀態。"""
         self._buffer = np.zeros(0, dtype=np.int16)
+        self._recent.clear()
         self.consecutive_frames = 0
         self.latest_score = 0.0
         self.peak_score = 0.0

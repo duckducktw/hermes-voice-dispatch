@@ -108,11 +108,15 @@ class WakeConfig:
     #     16:19:53 喚醒成功 score=0.96
     #   → **openWakeWord 的分數是單幀尖峰**（一幀衝高、下一幀就掉），不是平台狀，
     #     所以「連續 N 幀」這種條件天生就會擋掉正確命中，N 只能設 1。
-    #     誤喚醒的控制改由門檻負責（0.45 高出環境底 0.05~0.34 仍有邊際）。
-    oww_threshold: float = 0.45
-    # 連續幾個 80ms 幀過門檻才算命中。**openWakeWord 只能是 1**（見上）；
-    # 維持 >1 會讓 0.9x 的命中因為只有一幀而被丟掉。
-    oww_confirmation_frames: int = 1
+    # ⚠️ 2026-09-27（第三輪）使用者：「太鬆了，緊點」→ 純單幀 0.45 會誤喚醒。
+    #   → 改成**雙層判定**（見 oww.OwwSpotter）：
+    #       強命中：單幀 >= oww_threshold（真命中實測 0.94/0.96/0.97 → 秒醒）
+    #       弱命中：oww_window_frames 幀內有 >= oww_relaxed_hits 幀 >= oww_relaxed_threshold
+    #     單一雜訊尖峰（只有一幀 0.4~0.85、鄰居都低）→ 不再觸發。
+    oww_threshold: float = 0.85
+    oww_relaxed_threshold: float = 0.40
+    oww_relaxed_hits: int = 2
+    oww_window_frames: int = 6
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。
