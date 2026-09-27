@@ -88,3 +88,15 @@ def test_spoken_summary_truncates_at_sentence():
 def test_spoken_summary_short_passthrough():
     assert spoken_summary("好了", 160) == "好了"
     assert spoken_summary("", 160) == ""
+
+
+def test_spoken_summary_default_is_unlimited():
+    """2026-09-27 使用者：「完整的訊息不會唸出來」→ 預設不截斷。"""
+    t = "第一句話。" + "啊" * 500
+    assert spoken_summary(t) == t
+    assert spoken_summary(t, 0) == t
+    assert spoken_summary(t, -1) == t
+
+
+def test_spoken_summary_strips_ordered_list_markers():
+    assert spoken_summary("1. 第一項\n2. 第二項") == "第一項 第二項"

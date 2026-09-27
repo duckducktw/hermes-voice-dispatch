@@ -3,9 +3,10 @@
 **先讀 `SPEC.md`，那是一切的來源。** 本檔只是快速索引。
 
 ## 這是什麼
-Linux 筆電上的語音派工守護程式：喊「Hermes」喚醒（**Vosk 限制詞彙解碼**當關鍵詞
-偵測，**不需要拍手、不對喚醒詞做 STT**）→ 語音說需求 →
-複述（不等待確認）→ 轉發到 Discord #人工智障 並開討論串 → 派工給 Hermes agent 執行並回報。
+Linux 筆電上的語音派工守護程式：喊「hey Hermes」喚醒（**openWakeWord 波形判斷**，
+門檻 0.45／連續 2 幀；不需要拍手、不對喚醒詞做 STT）→ 語音說需求 →
+複述（不等待確認）→ 轉發到 Discord #人工智障 並開討論串 → 派工給 Hermes agent
+執行並回報（**結果用語音完整唸完，不截斷**）。
 
 ## 硬規則
 - 只用 `~/.hermes/hermes-agent/venv/bin/python3` 這個 venv（numpy / scipy / sounddevice /

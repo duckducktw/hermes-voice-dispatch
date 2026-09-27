@@ -98,9 +98,14 @@ class WakeConfig:
     # 離線負樣本（hey harry／the army／her mess／hermit／白噪音）全部 0.000~0.001；
     # 而且 25 分鐘內只有 1 筆觀測事件（環境很乾淨）→ 門檻可以拉高來**避免誤判**：
     # 0.7 遠低於他的 0.94、又遠高於雜訊底（~0.001）。
-    oww_threshold: float = 0.7
-    # 連續 3 個 80ms 幀都過門檻才算命中（＝至少 240ms 連續命中，更抗單一雜訊尖峰）。
-    oww_confirmation_frames: int = 3
+    # ⚠️ 2026-09-27 使用者：「現在語音喚醒太嚴格了」→ 放寬。實際房間 log 顯示
+    #   真的在喊時的分數落在 0.30~0.44，偶爾才衝到 0.74／0.77（但那時「連續 3 幀」
+    #   的條件沒滿足 → 沒醒）。真實房間分數遠低於離線 TTS 校準值，所以：
+    #     門檻 0.7 → 0.45、連續幀 3 → 2（＝160ms）。
+    #   環境雜訊底仍只在 0.05~0.22，留了安全邊際。真的**誤喚醒**再往上調。
+    oww_threshold: float = 0.45
+    # 連續 2 個 80ms 幀都過門檻才算命中（＝至少 160ms 連續命中，抗單一雜訊尖峰）。
+    oww_confirmation_frames: int = 2
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。
@@ -262,6 +267,10 @@ class TtsConfig:
     # 而配額用完會自動換 model → 固定倍率會讓語速忽快忽慢。設成「每秒幾個字」
     # 就跨 model 一致：使用者聽到的 5.72s/26 字 ≈ 4.55 字/秒，要「稍微快點」→ 5.2。
     speak_cps: float = 5.2
+    # 長文分段門檻（2026-09-27 使用者：「完整的訊息不會唸出來」→ 要完整唸完）。
+    # 超過這個字數就分句切成數段分別合成、再接成一個檔播放（tts.speak）。
+    # 0＝不分段（單次合成整段）。
+    speak_chunk_chars: int = 240
     # 品質守門門檻：合成後「字/秒」低於此值＝Gemini 很可能把風格指示也唸出來了
     # （實測正常 4.6~6.6s / 26 字 ≈ 4~5.6 字/秒；唸出指示會變 1.7 字/秒）→ 去掉指示重合成。
     gemini_min_cps: float = 3.0
@@ -307,9 +316,11 @@ class TtsConfig:
     #   "voice"＝舊行為，用 edge-tts 講 ok_prompt / retry_prompts / dispatched_prompt。
     prompt_mode: str = "chime"
     # 派工完成後用「語音」把結果念出來（使用者 2026-09-26 要求）。
-    # 只念一句短摘要（`spoken_summary` 去掉 Markdown、截斷），完整內容仍在 Discord 串內。
+    # 2026-09-27 使用者：「它現在都會截斷訊息，完整的訊息不會唸出來」→ 預設**不截斷**，
+    # 完整唸出來（長文由 tts 分句分段合成，見 tts.speak / tts.chunk_chars）。
+    # 想恢復「只唸一句短摘要」就填一個正數（例：160）。
     speak_result: bool = True
-    speak_result_max_chars: int = 160
+    speak_result_max_chars: int = 0
     # relay 模式：盯討論串、等它安靜幾秒就把最後一則 agent 訊息念出來。
     # 2026-09-26 使用者：「TTS 合成加速，現在跑完還要等一下才能聽到」——
     # 元凶就是這個安靜判定原本 60s（實測 16:54 回覆、16:55:08 才出聲＝慢 66s）。

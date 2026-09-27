@@ -194,6 +194,8 @@ journalctl --user -u voice-dispatch.service -f
 | Discord 401 | token 無效，檢查 `~/.hermes/.env` 的 `DISCORD_BOT_TOKEN`。 |
 | Discord 429 | 觸發速率限制，log 會顯示 `retry_after`；稍後再試。 |
 | 討論串名稱被截斷 | Discord thread 名上限 100 字元，屬正常行為。 |
+| **語音回報只唸一半就停** | 兩種成因：<br>(1) `tts.speak_result_max_chars` 為正數 → 只唸前 N 字。**0＝完整唸完**（預設）。<br>(2) Gemini TTS 單次輸出有音訊長度上限，長文會被**截斷**（實測 2000 字只出 104s＝18 字/秒，根本不可能）。tts 會依 `tts.speak_chunk_chars`（預設 240）分段合成再接起來，並用「合成後字/秒 ≫ 目標」自動偵測截斷、切半重合成。診斷：`tools/probe_speak_pipeline.py 1500`。 |
+| 喚醒叫不醒 | 看 log 的 `openWakeWord 觀測：近 5 秒最高分 X、最長連續 N 幀`：<br>(a) X 不夠高 → 降 `wake.oww_threshold`（現 0.45，房間實測 0.30~0.44）。<br>(b) X 夠高但 N < 需求 → 降 `wake.oww_confirmation_frames`（現 2）。<br>(c) X < 0.05 → 音訊沒進模型（裝置／音量／取樣率）。 |
 | 派工沒動靜 | 看 `dispatch.log_dir` 下的 `dispatch-*.log`；確認 `hermes` 在 PATH。 |
 
 ---

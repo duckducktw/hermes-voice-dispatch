@@ -57,8 +57,9 @@ wake:
   oww_model: "~/.hermes/hermes-agent/tools/wakewords/hey_hermes.onnx"
   # 2026-09-26 實測：使用者本人喊聲命中 **0.94／0.96／0.96**；離線負樣本
   # （hey harry／the army／her mess／hermit／白噪音）全部 0.000~0.001 → 門檻拉高**避免誤判**。
-  oww_threshold: 0.7
-  oww_confirmation_frames: 3   # 連續 3 個 80ms 幀都過才算命中（抗單一雜訊尖峰）
+  # ⚠️ 2026-09-27 實測房間分數只有 0.30~0.44（比 TTS 校準低很多）→ 放寬成 0.45 / 2 幀。
+  oww_threshold: 0.45
+  oww_confirmation_frames: 2   # 連續 2 個 80ms 幀都過才算命中（抗單一雜訊尖峰）
   oww_vad_threshold: 0.0  # 0=關；>0 時使用 openWakeWord 內建 Silero VAD 閘控
   kws_engine: "vosk"      # "vosk"（支援任意英文詞，現行預設）/"openwakeword"
   # ══ 串接式喚醒（2026-09-26 使用者定案：極限精準 + 極限延遲）══════════════
@@ -137,6 +138,8 @@ tts:
   # 同一 voice 在不同 Gemini model 語速差很多（3.1→4.6s／3.8→5.72s／lite→6.64s），
   # 而免費層配額用完會自動換 model，所以固定倍率會忽快忽慢。
   speak_cps: 5.2
+  # 長文分段門檻：超過這麼多字就分句切段合成、再接成一個檔（完整唸完）；0＝不分段。
+  speak_chunk_chars: 240
   speed: 1.0
   # edge 引擎的語速字串（gemini 靠上面的 speak_cps 控）
   rate: "+30%"

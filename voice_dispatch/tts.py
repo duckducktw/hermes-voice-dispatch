@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import tempfile
 from typing import List, Optional
@@ -516,36 +517,181 @@ def muted(cfg: Config) -> bool:
     return bool(p) and os.path.exists(p)
 
 
+# ── 長文分段（2026-09-27 使用者：「完整的訊息不會唸出來」）──────────────────
+# 使用者要求**完整唸完**，所以超過 `tts.speak_chunk_chars` 就切成幾段分別合成、
+# 再無縫接起來（實測單次 1200 字仍完整，但整段報告可到 2000 字，分段才穩）：
+#   - 優先切在句尾（。！？；!?;）
+#   - 單句本身就超長 → 硬切
+#   - chunk_chars <= 0 ＝不分段（維持單次合成）
+DEFAULT_SPEAK_CHUNK_CHARS = 240
+
+
+def split_speech_chunks(text: str, limit: int = DEFAULT_SPEAK_CHUNK_CHARS) -> List[str]:
+    """把長文切成每段 <= limit 字（盡量切在句尾）。limit <= 0 ＝不分段。"""
+    t = (text or "").strip()
+    if not t:
+        return []
+    if limit <= 0 or len(t) <= limit:
+        return [t]
+    out: List[str] = []
+    buf = ""
+    for s in re.split(r"(?<=[。！？；!?;])\s*", t):
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) > limit:
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.extend(s[i:i + limit] for i in range(0, len(s), limit))
+            continue
+        if len(buf) + len(s) <= limit:
+            buf += s
+        else:
+            if buf:
+                out.append(buf)
+            buf = s
+    if buf:
+        out.append(buf)
+    return out or [t]
+
+
+def _concat_audio(parts: List[str], out_path: str, logger=None) -> None:
+    """把多個音檔依序接成一個（重新編碼，避免各段串流參數不一致）。"""
+    listfile = out_path + ".concat.txt"
+    with open(listfile, "w", encoding="utf-8") as fh:
+        for p in parts:
+            fh.write("file '%s'\n" % p.replace("'", "'\\''"))
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+             "-i", listfile, "-c:a", "libmp3lame", "-ar", "24000", "-ac", "1", out_path],
+            check=True)
+    finally:
+        try:
+            os.remove(listfile)
+        except OSError:
+            pass
+    if logger:
+        logger.info("TTS 分段合成：%d 段 → 合併成一個檔", len(parts))
+
+
+def _synth_one(text: str, out_path: str, cfg: Config, engine: str, logger=None) -> None:
+    """合成單一段落（gemini 失敗自動退回 edge-tts）。"""
+    if engine == "gemini":
+        try:
+            synth_gemini_to_file(text, out_path, cfg, logger=logger)
+            return
+        except Exception as exc:  # noqa: BLE001 - 退回 edge-tts
+            if logger:
+                logger.warning("Gemini TTS 失敗（%s）→ 退回 edge-tts", exc)
+    synth_to_file(text, out_path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+
+
+def _apply_pace(path: str, text: str, cfg: Config, logger=None) -> None:
+    """語速：優先「正規化」（跨 model 一致）；沒設才用固定倍率 speed。"""
+    cps = float(getattr(cfg.tts, "speak_cps", 0.0) or 0.0)
+    if cps > 0:
+        normalise_pace(path, text, cps, logger=logger)
+    else:
+        _apply_speed(path, float(getattr(cfg.tts, "speed", 1.0) or 1.0), logger=logger)
+
+
+def _split_in_half_at_sentence(text: str):
+    """在接近中點處切兩半（優先句尾，其次逗號／空白，最後硬切）。"""
+    mid = len(text) // 2
+    for sep in ("。", "！", "？", "；", "，", ",", " "):
+        i = text.rfind(sep, 0, mid + 1)
+        if i >= mid // 2:
+            return text[:i + 1].strip(), text[i + 1:].strip()
+    return text[:mid].strip(), text[mid:].strip()
+
+
+def _synth_unit(text: str, out_path: str, cfg: Config, engine: str,
+                logger=None, depth: int = 0) -> None:
+    """合成「一段」台詞；若疑似被模型截斷就自動再切半重合成（遞迴上限 2 層）。
+
+    為什麼要這個守門（2026-09-27 實測）：Gemini TTS **單次輸出有音訊長度上限**，
+    超過就一直截短——同一顆 model 下：
+
+        200 字 → 57.7s（4.94 字/秒，正常）
+       1200 字 → 150.4s（7.56 字/秒，已偏快）
+       2000 字 → 104.7s（18.09 字/秒，**根本不可能**＝明顯被截斷、後半段沒唸）
+
+    真實語速約 4~5 字/秒，所以合成後「字/秒」遠高於目標＝模型把內容吃掉了。
+    靠這個訊號自動半切重合成，比單純調小分段門檻更 robust（不用猜上限）。
+    """
+    _synth_one(text, out_path, cfg, engine, logger=logger)
+    tar = float(getattr(cfg.tts, "speak_cps", 0.0) or 0.0)
+    n = len([c for c in text if not c.isspace()])
+    if depth >= 2 or tar <= 0 or n < 40:
+        return
+    dur = _duration(out_path)
+    if dur <= 0.3:
+        return
+    cps = n / dur
+    if cps <= tar * 2.2:
+        return
+    a, b = _split_in_half_at_sentence(text)
+    if not b:
+        return
+    if logger:
+        logger.warning("TTS 疑似被模型截斷（%.2f 字/秒 ≫ 目標 %.2f，%d 字）→ 切半重合成",
+                       cps, tar, n)
+    pa, pb = out_path + ".a.mp3", out_path + ".b.mp3"
+    try:
+        _synth_unit(a, pa, cfg, engine, logger=logger, depth=depth + 1)
+        _synth_unit(b, pb, cfg, engine, logger=logger, depth=depth + 1)
+        _concat_audio([pa, pb], out_path, logger=logger)
+    finally:
+        for p in (pa, pb):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def speak(text: str, cfg: Config, logger=None) -> bool:
-    """合成語音並播放。失敗時記 log 但不丟例外（語音提示非關鍵路徑）。"""
+    """合成語音並播放。失敗時記 log 但不丟例外（語音提示非關鍵路徑）。
+
+    長文（> `tts.speak_chunk_chars`）會分句分段合成再接起來 → **完整唸完不截斷**。
+    """
     if not text:
         return False
     if muted(cfg):
         if logger:
             logger.info("TTS 靜音中 → 跳過：%r", text)
         return False
-    path = os.path.join(tempfile.gettempdir(), f"vd_tts_{os.getpid()}.mp3")
+    base = os.path.join(tempfile.gettempdir(), f"vd_tts_{os.getpid()}")
+    path = base + ".mp3"
     engine = (getattr(cfg.tts, "engine", "edge") or "edge").strip().lower()
+    chunk_chars = int(getattr(cfg.tts, "speak_chunk_chars",
+                             DEFAULT_SPEAK_CHUNK_CHARS) or 0)
+    chunks = split_speech_chunks(text, chunk_chars)
+    parts: List[str] = []
     try:
-        if engine == "gemini":
-            try:
-                synth_gemini_to_file(text, path, cfg, logger=logger)
-            except Exception as exc:  # noqa: BLE001 - 退回 edge-tts，語音提示不該中斷流程
-                if logger:
-                    logger.warning("Gemini TTS 失敗（%s）→ 退回 edge-tts", exc)
-                synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
+        if len(chunks) <= 1:
+            _synth_unit(text, path, cfg, engine, logger=logger)
+            _apply_pace(path, text, cfg, logger=logger)
         else:
-            synth_to_file(text, path, cfg.tts.voice, getattr(cfg.tts, "rate", ""))
-        # 語速：優先「正規化」（跨 model 一致）；沒設才用固定倍率 speed。
-        cps = float(getattr(cfg.tts, "speak_cps", 0.0) or 0.0)
-        if cps > 0:
-            normalise_pace(path, text, cps, logger=logger)
-        else:
-            _apply_speed(path, float(getattr(cfg.tts, "speed", 1.0) or 1.0), logger=logger)
+            if logger:
+                logger.info("TTS 長文（%d 字）→ 切成 %d 段合成", len(text), len(chunks))
+            for i, ch in enumerate(chunks):
+                p = f"{base}.part{i}.mp3"
+                _synth_unit(ch, p, cfg, engine, logger=logger)
+                _apply_pace(p, ch, cfg, logger=logger)
+                parts.append(p)
+            _concat_audio(parts, path, logger=logger)
     except Exception as exc:  # noqa: BLE001 - 網路/合成失敗都不該讓主流程崩潰
         if logger:
             logger.warning("TTS 合成失敗：%s", exc)
         return False
+    finally:
+        for p in parts:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     try:
         return audio.play_file(path, cfg.audio, logger=logger)
     finally:
