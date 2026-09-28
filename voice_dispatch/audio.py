@@ -15,7 +15,7 @@ import threading
 import time
 import wave
 from contextlib import contextmanager
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
@@ -306,6 +306,103 @@ def output_quiet_sec() -> float:
         if _OUTPUT_ENDED_AT <= 0.0:
             return float("inf")
         return max(0.0, time.monotonic() - _OUTPUT_ENDED_AT)
+
+
+# ── 「整台電腦」是否正在出聲（2026-09-28 使用者：「要排除電腦發出的聲音」）────
+# 上面的 output_busy() 只知道 **daemon 自己** 播的東西；YouTube／Discord／
+# Minecraft／音樂播放器的聲音它一概不知道 → 喇叭放出來的人聲被麥克風收回去，
+# 就變成誤喚醒（skill 已記錄：這類誤觸是 content-specific，**調門檻治不了，
+# 只能靠來源閘門**）。
+#
+# ⚠️ 為什麼不用 AEC（回音消除）：2026-09-28 實測 PipeWire
+# `module-echo-cancel`（webrtc）掛在這支 USB mic 上，播放同一段 TTS 時
+# ac_rms 只從 0.055 降到 0.040（**衰減僅 27%**），遠不足以讓喚醒判定分辨，
+# 而且要把所有 app 的音訊改道經過 AEC sink（風險高）。→ 放棄，改用閘門。
+#
+# ⚠️ 為什麼**不**用 `pactl list sink-inputs` 數「有幾個未 corked 的串流」：
+# 2026-09-28 實測本機常駐就有 Minecraft(java) x2、Discord(WEBRTC VoiceEngine)、
+# speech-dispatcher-dummy 掛在那裡且永遠 `Corked: no`，但**實際沒在出聲**
+# → 用串流數當閘門會永遠關著、整天叫不醒。
+# 正解是讀 **sink 的 monitor 電平**（喇叭真正輸出的波形）：安靜時 ~0.0001，
+# 播影片時 0.03（差 300 倍）。這是「有沒有真的出聲」的唯一可靠訊號。
+_MON_LOCK = threading.Lock()
+_MON_CACHE = (0.0, False)    # (查詢時間 monotonic, 是否真的在出聲)
+_MON_LAST_LOUD = 0.0         # 上次量到「真的在出聲」的時間（黏性條件用）
+
+
+def _default_sink_monitor() -> str:
+    """取預設 sink 的 monitor 來源名。失敗回空字串。"""
+    try:
+        sink = subprocess.run(
+            ["pactl", "get-default-sink"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        return f"{sink}.monitor" if sink else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def system_audio_playing(
+    ttl: float = 1.0,
+    threshold: float = 0.002,
+    probe_sec: float = 0.25,
+) -> bool:
+    """喇叭現在是不是真的在出聲（讀預設 sink 的 monitor 電平，快取 `ttl` 秒）。
+
+    `threshold`：monitor 的 AC-RMS 門檻。實測安靜 ~0.0001、播影片 0.03，
+    取 0.002 卡在中間（比安靜高 20 倍、比播放低 15 倍）。
+
+    失敗時回 **False**（fail-open）——寧可放行也不要因為輔助偵測失效就叫不醒。
+    """
+    global _MON_CACHE, _MON_LAST_LOUD
+    now = time.monotonic()
+    with _MON_LOCK:
+        cached_at, cached = _MON_CACHE
+        if cached_at and (now - cached_at) < max(0.0, ttl):
+            return cached
+
+    playing = False
+    monitor = _default_sink_monitor()
+    if monitor:
+        try:
+            # 用 ffmpeg 錄一小段定長 raw PCM（會自己結束，不必靠 timeout 收屍）。
+            proc = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-f", "pulse", "-i", monitor,
+                 "-t", f"{max(0.05, probe_sec):.2f}",
+                 "-ar", "16000", "-ac", "1",
+                 "-f", "s16le", "-"],
+                capture_output=True, timeout=max(2.0, probe_sec + 3.0),
+            )
+            data = proc.stdout or b""
+            if len(data) >= 2:
+                arr = np.frombuffer(
+                    data[: len(data) // 2 * 2], dtype=np.int16
+                ).astype(np.float32) / 32768.0
+                if arr.size:
+                    ac = arr - float(arr.mean())
+                    playing = float(np.sqrt(np.mean(np.square(ac)))) >= threshold
+        except Exception:  # noqa: BLE001 - fail-open
+            playing = False
+
+    with _MON_LOCK:
+        _MON_CACHE = (now, playing)
+        if playing:
+            _MON_LAST_LOUD = now
+    return playing
+
+
+def system_audio_recent_sec() -> float:
+    """電腦上次被量到「真的在出聲」距今幾秒。從沒量到回 `inf`。
+
+    為什麼需要：語音（影片對白、歌詞）**句與句之間會有停頓**，單次 0.25s 取樣
+    正好落在停頓上就會量到 False（2026-09-28 實測 4 次取樣中有 1 次）。
+    喚醒閘門要用「最近 N 秒內有出聲」這個黏性條件，不能只看當下那一瞬間。
+    """
+    with _MON_LOCK:
+        if _MON_LAST_LOUD <= 0.0:
+            return float("inf")
+        return max(0.0, time.monotonic() - _MON_LAST_LOUD)
 
 
 @contextmanager

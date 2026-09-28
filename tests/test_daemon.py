@@ -120,6 +120,8 @@ def test_single_flight_blocks_second_wake():
 def test_single_flight_can_be_disabled():
     cfg = Config()
     cfg.wake.single_flight = False
+    # 隔離第③條「整台電腦在出聲就不喚醒」（會去讀 sink monitor 實際電平）。
+    cfg.wake.mute_while_system_audio = False
     d = VoiceDispatcher(cfg, dry_run=True)
     d._round_begin()
     assert d._round_active() is False

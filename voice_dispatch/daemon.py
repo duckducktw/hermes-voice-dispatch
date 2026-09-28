@@ -245,12 +245,17 @@ class VoiceDispatcher:
     def _echo_muted(self) -> bool:
         """喚醒閘：什麼時候「不要」做喚醒偵測。
 
-        三個來源都要擋：
+        四個來源都要擋：
           ⓪ **single-flight**：已經有一輪在進行中（`wake.single_flight`）——
              2026-09-27 使用者：「已經有其中一個被喚醒的就不要再喚醒，避免我在
              講話的過程中又誤觸第二遍」。
           ① 正在播（`audio.output_busy()`）——可能是背景 thread 在播語音回報；
           ② 剛播完的殘響／裝置緩衝（`wake.echo_guard_sec` 秒內）。
+          ③ **整台電腦在出聲**（`wake.mute_while_system_audio`）——2026-09-28
+             使用者：「要排除電腦發出的聲音」。①② 只知道 daemon 自己播的東西，
+             YouTube／Discord／Minecraft 的人聲從喇叭出去被麥克風收回來一樣會
+             誤喚醒（skill 已記錄：這類誤觸 content-specific，調門檻治不了，
+             **只能靠來源閘門**）。
 
         不做 ①② 的話它會把自己的提示音／TTS 收回來當成「hey hermes」→ 誤喚醒 →
         再播一輪提示音 → 連響（2026-09-26 使用者回報的症狀）。
@@ -260,9 +265,23 @@ class VoiceDispatcher:
         if audio.output_busy():
             return True
         guard = float(getattr(self.cfg.wake, "echo_guard_sec", 0.0) or 0.0)
-        if guard <= 0.0:
-            return False
-        return audio.output_quiet_sec() < guard
+        if guard > 0.0 and audio.output_quiet_sec() < guard:
+            return True
+        # ③ 整台電腦在出聲（含剛剛出聲完的黏性視窗，避免落在對白停頓上漏擋）
+        if getattr(self.cfg.wake, "mute_while_system_audio", False):
+            sys_guard = float(
+                getattr(self.cfg.wake, "system_audio_guard_sec", 1.5) or 0.0
+            )
+            if audio.system_audio_playing(
+                ttl=float(getattr(self.cfg.wake, "system_audio_poll_sec", 1.0) or 1.0),
+                threshold=float(
+                    getattr(self.cfg.wake, "system_audio_rms_threshold", 0.002) or 0.002
+                ),
+            ):
+                return True
+            if sys_guard > 0.0 and audio.system_audio_recent_sec() < sys_guard:
+                return True
+        return False
 
     def _skip_echo_blocks(self, blocks):
         """把「我們自己在出聲」期間的區塊濾掉（給不自己判狀態的消費端用）。"""

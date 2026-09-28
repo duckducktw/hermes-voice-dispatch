@@ -215,6 +215,21 @@ class WakeConfig:
     # 修法＝播放期間完全不餵音訊給喚醒偵測器，播完再等 echo_guard_sec 讓殘響／
     # 裝置緩衝排掉才恢復監聽。設 0 ＝關掉半雙工（回到舊行為）。
     echo_guard_sec: float = 0.8
+    # ── ③ 整台電腦在出聲時不喚醒（2026-09-28 使用者：「要排除電腦發出的聲音」）──
+    # echo_guard 只管 daemon 自己播的東西；YouTube／Discord／Minecraft 的人聲
+    # 從喇叭出去、被麥克風收回來一樣會誤喚醒。
+    # 判定＝讀預設 sink 的 **monitor 電平**（喇叭真正輸出的波形）。
+    # ⚠️ 不要改用「數 pactl sink-inputs 有幾個未 corked」：本機 Minecraft/Discord
+    #    常駐串流永遠 Corked: no 但沒在出聲 → 閘門會永遠關著、整天叫不醒。
+    # ⚠️ 也不要改用 AEC：實測 PipeWire module-echo-cancel 對這支 USB mic
+    #    只衰減 27%（ac_rms 0.055→0.040），不夠讓喚醒判定分辨。
+    # ⚠️ 預設 **False**：2026-09-28 實測本機常有 Minecraft／影片在出聲
+    #    （monitor ac_rms 到 0.21），無條件擋會讓那段時間完全叫不醒 →
+    #    使用者要求先關掉再想取捨。要啟用就在 config.yaml 設 true。
+    mute_while_system_audio: bool = False
+    system_audio_rms_threshold: float = 0.002   # 安靜 ~0.0001、播影片 0.03
+    system_audio_poll_sec: float = 1.0          # 偵測結果快取秒數（熱路徑，別設 0）
+    system_audio_guard_sec: float = 1.5         # 出聲後的黏性視窗（跨過對白停頓）
     # ── single-flight：已經有一輪在進行中就不再喚醒 ─────────────────
     # 2026-09-27 使用者：「如果已經有其中一個被喚醒的就不要再喚醒，避免我在講話的
     # 過程中又誤觸第二遍」。一輪 = 從喚醒開始，到（a）派工送出、且（b）結果監看

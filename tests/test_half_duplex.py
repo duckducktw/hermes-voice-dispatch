@@ -19,7 +19,12 @@ from voice_dispatch.daemon import VoiceDispatcher
 
 @pytest.fixture()
 def d():
-    return VoiceDispatcher(Config(), dry_run=True)
+    cfg = Config()
+    # 這一組測試專測 ①② 半雙工（daemon 自己的播放）邏輯。
+    # 第③條「整台電腦在出聲就不喚醒」(2026-09-28) 會真的去讀 sink monitor 電平，
+    # 在有聲音的開發機上會讓 _echo_muted() 一律回 True → 隔離掉它。
+    cfg.wake.mute_while_system_audio = False
+    return VoiceDispatcher(cfg, dry_run=True)
 
 
 # --------------------------------------------------------------------------
