@@ -589,7 +589,17 @@ def synth_gemini_to_file(text: str, out_path: str, cfg: Config, logger=None) -> 
         raise RuntimeError("找不到 Gemini API key（tts.gemini_api_key_env / .env）")
 
     style = (getattr(cfg.tts, "gemini_style", "") or "").strip()
-    prompt = f"# 風格指示\n{style}\n# 台詞\n{text}" if style else text
+    # ⚠️ 2026-09-28：光有「# 風格指示 / # 台詞」分節還不夠。使用者回報「內文被提示詞汙染，
+    # 變成自導自演、說自己是集團總裁在宣布事情」——模型會把風格指示當成**情境**，
+    # 於是照那個角色改寫台詞、加開場白。所以要明寫「只是唸法，逐字照唸、不得增刪改寫」。
+    prompt = (
+        "# 風格指示（只影響唸法，不是內容，不得唸出、不得照它改寫台詞）\n"
+        f"{style}\n"
+        "# 規則\n"
+        "逐字唸出下面「台詞」區塊的文字；不增加、不刪減、不改寫、不加開場白或結語。\n"
+        "# 台詞\n"
+        f"{text}"
+    ) if style else text
     voice = getattr(cfg.tts, "voice", "") or "Charon"
     timeout = float(getattr(cfg.tts, "gemini_timeout_sec", 60) or 60)
     models = [getattr(cfg.tts, "gemini_model", "")] + list(
