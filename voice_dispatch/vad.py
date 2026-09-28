@@ -44,6 +44,9 @@ class VadSegmenter:
         self._last_voice_t: Optional[float] = None
         self._started = False
         self._finished = False
+        # 累積「真的有語音」的秒數，用來算語音佔比（early-giveup 用）。
+        self._voiced_time = 0.0
+        self._prev_t: Optional[float] = None
 
     @property
     def started(self) -> bool:
@@ -82,6 +85,8 @@ class VadSegmenter:
         # 已在錄音中
         if voiced:
             self._last_voice_t = t
+            self._voiced_time += max(0.0, t - self._prev_t) if self._prev_t is not None else 0.0
+        self._prev_t = t
 
         # 注意：起始時間可能正好是 0.0，不能用「x or t」判斷（0.0 為 falsy）
         start = self._speech_start_t if self._speech_start_t is not None else t
@@ -91,6 +96,17 @@ class VadSegmenter:
         if duration >= cfg.max_record_sec:
             self._finished = True
             return VadState.DONE
+
+        # 2026-09-28（使用者：「如果沒說話就把時間縮短」）：
+        # 錄到 early_giveup_sec 還沒累積夠語音時間，就不要再陪它錄到 max_record_sec。
+        # 症狀：媒體聲／環境聲會讓 VAD 斷斷續續 voiced，於是一路錄滿 60s（實測 60.10s）
+        # → 使用者乾等、還多一張假任務卡。真正在講需求時語音佔比很高（>50%）。
+        give_up = float(getattr(cfg, "early_giveup_sec", 0.0) or 0.0)
+        need_ratio = float(getattr(cfg, "early_giveup_min_voiced_ratio", 0.0) or 0.0)
+        if give_up > 0 and duration >= give_up:
+            if self._voiced_time < duration * need_ratio:
+                self._finished = True
+                return VadState.DONE
 
         silence = t - last_voice
         if silence >= cfg.trailing_silence_sec and duration >= cfg.min_record_sec:

@@ -223,7 +223,12 @@ class WakeConfig:
     single_flight: bool = True
     # 監看執行緒最長佔住閘門的秒數（保險絲，避免監看卡死就再也叫不醒）。
     # 0 = 不設限（吃 tts.speak_result_watch_sec 的上限）。
-    single_flight_max_sec: float = 900.0
+    # 保險絲：一輪卡住時最多鎖這麼久就強制解鎖。
+    # 2026-09-28 從 900s 改 90s（使用者：「timeout 短點，不要那麼久」）：
+    # 鎖的範圍已縮回「喚醒 → 錄需求 → 派工送出」，實測最長約 60~70s
+    # （需求錄音上限 60s + STT + webhook），90s 已經很寬。
+    # 以前設 900s 是因為鎖含整個任務執行期，那個設計已經移除（見 daemon.py 註解）。
+    single_flight_max_sec: float = 90.0
     # ── mode="clap"（舊路徑）─────────────────────────────────────
     window_sec: float = 2.5
     cooldown_sec: float = 10.0
@@ -257,6 +262,13 @@ class VadConfig:
     preroll_timeout_sec: float = 3.0     # 前置靜音等待上限（都沒講話就放棄；2026-09-26 8→3s）
     trailing_silence_sec: float = 1.2    # 講完後連續靜音多久視為結束
     max_record_sec: float = 60.0         # 單次錄音最長
+    # 2026-09-28（使用者：「如果沒說話就把時間縮短」）提早放棄的閘門：
+    # 錄到 early_giveup_sec 秒時，若「真的有語音」的累積時間不到總時長的
+    # early_giveup_min_voiced_ratio，就提早收工，不要陪環境聲／媒體聲錄滿 60s。
+    # 實測：真講需求時語音佔比 > 0.5；媒體/環境聲斷斷續續觸發 VAD，佔比很低。
+    # 0 = 停用這個閘門。
+    early_giveup_sec: float = 12.0
+    early_giveup_min_voiced_ratio: float = 0.35
     min_record_sec: float = 0.5          # 單次錄音最短（低於此不算數）
 
 

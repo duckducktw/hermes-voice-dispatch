@@ -69,3 +69,42 @@ def test_terminal_state_is_sticky():
             break
     # 之後再餵仍維持 TIMEOUT（never started）
     assert seg.feed(0.5, t + 1) == VadState.TIMEOUT
+
+
+# ── early-giveup：語音佔比太低就提早收（2026-09-28）──────────────────────
+# 使用者：「如果沒說話就把時間縮短」。症狀：媒體／環境聲讓 VAD 斷斷續續 voiced，
+# 於是一路錄滿 max_record_sec(60s)（實測 60.10s）→ 乾等 + 多一張假任務卡。
+
+
+def test_early_giveup_on_sparse_voice():
+    """斷斷續續的環境聲（每 10 塊才 1 塊 voiced，佔比 ~10%）→ 12s 左右就收，不等到 60s。"""
+    cfg = _cfg()
+    seg = VadSegmenter(cfg)
+    t = 0.0
+    seg.feed(0.1, t)                 # 起頭要有一次語音才會進錄音狀態
+    done_at = None
+    for i in range(1, 1200):
+        t += 0.064
+        voiced = (i % 10 == 0)       # 稀疏語音
+        if seg.feed(0.1 if voiced else 0.0, t, voiced=voiced) == VadState.DONE:
+            done_at = t
+            break
+    assert done_at is not None
+    # 必須遠早於 max_record_sec；trailing_silence 也可能先切，兩者都算「提早收」
+    assert done_at < cfg.max_record_sec / 2
+
+
+def test_early_giveup_does_not_kill_real_speech():
+    """真的連續講話（佔比 100%）→ 不會被 early-giveup 誤殺，可一路講到 60s 上限。"""
+    cfg = _cfg()
+    seg = VadSegmenter(cfg)
+    t = 0.0
+    seg.feed(0.1, t)
+    last = None
+    while t < cfg.early_giveup_sec + 5.0:
+        t += 0.064
+        last = seg.feed(0.1, t, voiced=True)
+        if last == VadState.DONE:
+            break
+    # 講到超過 early_giveup_sec 還是 SPEAKING（沒有被提早切掉）
+    assert last == VadState.SPEAKING
