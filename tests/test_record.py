@@ -24,7 +24,14 @@ class _FakeStream:
 
 @pytest.fixture()
 def disp():
-    return VoiceDispatcher(Config(), dry_run=True)
+    cfg = Config()
+    # 這組測試餵的是**合成方波**（np.full(..., 0.3)），不是真語音 —— Silero 神經網路
+    # 判不出它是人聲（回 False），所以這裡必須關掉 Silero，改走 RMS 門檻路徑，
+    # 才是在測 `_record_utterance` 的 pre-roll／drain 行為本身。
+    # （2026-09-28：以前沒關也會通過，是因為 Silero 的 None 會退回 RMS 門檻；
+    #   那個 fallback 已修掉——它會讓 AEC 底噪被當成說話、錄滿 60 秒。）
+    cfg.vad.use_silero = False
+    return VoiceDispatcher(cfg, dry_run=True)
 
 
 def _run(monkeypatch, disp, blocks):

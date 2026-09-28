@@ -137,7 +137,11 @@ class VoiceDispatcher:
         return np.concatenate(chunks)[:needed]
 
     def _get_silero(self):
-        """惰性建立 Silero VAD；載入失敗就退回 RMS 門檻（回傳 None）。"""
+        """惰性建立 Silero VAD；載入失敗或 `vad.use_silero=false` 就退回 RMS 門檻（回傳 None）。"""
+        # 2026-09-28：`use_silero` 這個設定過去**從來沒被讀取**（只在 config.py 定義），
+        # 想關掉 Silero 的人會以為設了 false 就生效，其實照樣載入。這裡補上。
+        if not getattr(self.cfg.vad, "use_silero", True):
+            return None
         if self._silero is None:
             try:
                 self._silero = kws.SileroVad(
@@ -185,6 +189,9 @@ class VoiceDispatcher:
         pre: deque = deque(maxlen=keep_n)      # 語音開始前的滾動緩衝
         chunks: List[np.ndarray] = []
         silero = self._get_silero()
+        # Silero 回 None（視窗還沒湊滿）時延用的上一次判定。初值 False＝先當成安靜，
+        # 這樣「喚醒後完全沒講話」仍會在 preroll_timeout_sec 正常逾時。
+        last_voiced = False
         idx = 0
         for block in audio.read_blocks(stream, blocksize):
             if self._stop:
@@ -192,8 +199,25 @@ class VoiceDispatcher:
             t = idx * block_dur
             idx += 1
             rms = float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
-            # Silero 以 80ms 為單位推論，答案會比當前區塊晚一點（可接受）
-            voiced = silero.feed(block) if silero is not None else None
+            # Silero 以 80ms 為單位推論，答案會比當前區塊晚一點（可接受）。
+            # ⚠️ 2026-09-28：blocksize(1024 樣本 = 64ms) < Silero 的 80ms 視窗，所以
+            # 大約每 4~5 塊就有 1 塊拿到 None（實測安靜 6 秒：None=19、False=74）。
+            # 以前 None 會讓 VadSegmenter 退回 `rms >= speech_rms_threshold`，
+            # 而啟用 AEC 後底噪 rms≈0.0144 **高於**門檻 0.012 →
+            # 每隔幾塊就假 voiced 一次 → 尾靜音永遠累積不到 trailing_silence_sec →
+            # **講完話後一路錄到 max_record_sec(60s) 才停**（使用者：「我剛剛說完需求，
+            # 過了很久才停」，log 實測 60.10s）。
+            # → Silero 在線時，None 一律**延用上一次判定**，不要退回 RMS 門檻。
+            #   （Silero 本身對這個底噪判得很準：prob 0.013~0.036，全部 False。）
+            if silero is not None:
+                raw = silero.feed(block)
+                if raw is None:
+                    voiced = last_voiced
+                else:
+                    voiced = raw
+                    last_voiced = raw
+            else:
+                voiced = None       # 沒有 Silero → 交給 VadSegmenter 用 RMS 門檻
             was_started = seg.started
             state = seg.feed(rms, t, voiced=voiced)
             if seg.started and not was_started:

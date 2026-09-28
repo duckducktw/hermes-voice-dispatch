@@ -108,3 +108,50 @@ def test_early_giveup_does_not_kill_real_speech():
             break
     # 講到超過 early_giveup_sec 還是 SPEAKING（沒有被提早切掉）
     assert last == VadState.SPEAKING
+
+
+# ── Silero 回 None 不可退回 RMS 門檻（2026-09-28）─────────────────────────
+# 症狀（使用者：「我剛剛說完需求，過了很久才停」）：講完話後一路錄到 max_record_sec
+# (60s) 才停，實測 60.10s。
+# 根因：blocksize 1024 樣本 = 64ms < Silero 的 80ms 視窗 → 約每 4~5 塊有 1 塊回 None
+# （實測安靜 6 秒：None=19、False=74）。那些 None 以前會讓 VadSegmenter 退回
+# `rms >= speech_rms_threshold(0.012)`，而啟用 AEC 後底噪 rms≈0.0144 **高於**門檻
+# → 每隔幾塊就假 voiced 一次 → 尾靜音永遠累積不到 trailing_silence_sec。
+# 修法在 daemon._record_until_silence：Silero 在線時 None 延用上一次判定。
+# 這裡直接測 VadSegmenter 的契約：一旦 voiced 穩定 False，就必須在
+# trailing_silence_sec 內收工，不受 rms 高於門檻影響。
+def test_trailing_silence_cuts_even_when_rms_above_threshold():
+    """voiced=False 但 rms 高於門檻（AEC 底噪）→ 仍要靠 voiced 收工。"""
+    cfg = _cfg()
+    seg = VadSegmenter(cfg)
+    noisy = cfg.speech_rms_threshold * 1.2   # 模擬 AEC 底噪：高於 RMS 門檻
+    t = 0.0
+    # 先講話 0.5s（voiced=True）
+    assert seg.feed(0.1, t, voiced=True) == VadState.SPEAKING
+    for _ in range(8):
+        t += 0.064
+        seg.feed(0.1, t, voiced=True)
+    # 講完：voiced 轉 False，但 rms 仍高於門檻（就是這個組合以前卡住）
+    last = None
+    for _ in range(40):
+        t += 0.064
+        last = seg.feed(noisy, t, voiced=False)
+        if last == VadState.DONE:
+            break
+    assert last == VadState.DONE, "voiced=False 時必須收工，不能因 rms 高於門檻繼續錄"
+
+
+def test_preroll_timeout_still_fires_with_noisy_floor():
+    """喚醒後沒講話：voiced 一直 False（rms 高於門檻）→ 仍要 preroll 逾時。"""
+    cfg = _cfg()
+    seg = VadSegmenter(cfg)
+    noisy = cfg.speech_rms_threshold * 1.2
+    t = 0.0
+    last = None
+    for _ in range(int(cfg.preroll_timeout_sec / 0.064) + 5):
+        last = seg.feed(noisy, t, voiced=False)
+        if last == VadState.TIMEOUT:
+            break
+        t += 0.064
+    assert last == VadState.TIMEOUT
+    assert seg.started is False
