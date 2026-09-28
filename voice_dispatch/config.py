@@ -52,6 +52,9 @@ class AudioConfig:
     # 連續健康幾秒才把「恢復失敗計數」歸零。重啟後 mic 常會假活十幾秒就又凍結，
     # 若一通過就歸零，退避永遠長不起來（會變成每 2 分鐘重啟一次）。
     recover_reset_healthy_sec: float = 180.0
+    # 2026-09-28：死訊號時只 suspend/resume 自己這支 source 的冷卻秒數（0＝停用）。
+    # 這是比 recover_command（重啟 pipewire，會砍掉所有 app 音訊）輕得多的恢復手段。
+    resuspend_cooldown_sec: float = 120.0
     status_file: str = "~/.local/state/hermes-voice-dispatch/mic-status.json"
     # 播放器候選，依序嘗試（會用 shlex 拆成 argv，{file} 由檔名取代）
     # 播放器候選（依序嘗試）。**每一個都必須真的支援 mp3**。
@@ -131,6 +134,11 @@ class WakeConfig:
     oww_relaxed_threshold: float = 0.60
     oww_relaxed_hits: int = 2
     oww_window_frames: int = 6
+    # 2026-09-28：靜音閘（去 DC 後的 AC-RMS）。麥克風變死訊號（常數 DC、AC≈0）時，
+    # openWakeWord 仍會穩定吐 0.85~0.97 的假強命中 —— 9/27 晚~9/28 整天 237 次喚醒
+    # 只有 14 次有真內容，夜間 2~7 點無人講話卻喚醒 80+ 次就是這個。
+    # 調門檻治不了（真喊也是 0.85~0.97，完全重疊），只能用「有沒有訊號」當閘門。
+    oww_min_ac_rms: float = 0.0012
     # 0 = 關閉；大於 0 時交由 openWakeWord 內建 Silero VAD 閘控。
     oww_vad_threshold: float = 0.0
     # 可選：hey_jarvis / alexa / hey_mycroft / hey_rhasspy / timer / weather。

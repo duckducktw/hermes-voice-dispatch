@@ -35,6 +35,9 @@ def _spotter_with_scores(monkeypatch, scores, **kw):
         relaxed_threshold=kw.get("relaxed", 0.60),
         window_frames=kw.get("window", 6),
         relaxed_hits=kw.get("hits", 2),
+        # 這些測試用 monkeypatch 直接餵分數、音訊是合成零幀，
+        # 會被 min_ac_rms 靜音閘擋掉 → 測分層判定時顯式停用它。
+        min_ac_rms=kw.get("min_ac_rms", 0.0),
     )
     it = iter(scores)
     monkeypatch.setattr(spotter, "_score", lambda frame: next(it, 0.0))
@@ -84,3 +87,32 @@ def test_below_relaxed_never_fires(monkeypatch):
     scores = [0.34] * 20
     spotter = _spotter_with_scores(monkeypatch, scores)
     assert not any(_feed(spotter, len(scores)))
+
+
+# ── 靜音閘（min_ac_rms）回歸，2026-09-28 ────────────────────────────────
+# 根因：麥克風變死訊號（常數 DC、AC≈0）時 openWakeWord 仍穩定吐 0.85~0.97 的
+# 假強命中 → 9/27 晚~9/28 共 237 次喚醒只有 14 次有真內容。真喊的 AC-RMS 約
+# 0.06，死訊號約 0.0003（差 200 倍），所以用「有沒有訊號」當閘門，不動門檻。
+
+
+def _dc_frame(dc: float = 0.008) -> np.ndarray:
+    """模擬死訊號：純直流、完全沒有 AC 成分。"""
+    return np.full(1280, int(dc * 32768), dtype=np.int16)
+
+
+def _speech_frame(amp: float = 0.06) -> np.ndarray:
+    """模擬真實語音電平的 AC 訊號。"""
+    t = np.arange(1280) / 16000.0
+    return (np.sin(2 * np.pi * 300 * t) * amp * 32767).astype(np.int16)
+
+
+def test_dc_only_frames_never_fire(monkeypatch):
+    """死訊號（純 DC）即使模型吐 0.95，也因為沒有 AC 訊號而不觸發。"""
+    spotter = _spotter_with_scores(monkeypatch, [0.95] * 10, min_ac_rms=0.0012)
+    assert not any(spotter.feed(_dc_frame()) for _ in range(10))
+
+
+def test_real_level_speech_still_fires(monkeypatch):
+    """真實語音電平不會被靜音閘誤殺（避免矯枉過正把真喊擋掉）。"""
+    spotter = _spotter_with_scores(monkeypatch, [0.95], min_ac_rms=0.0012)
+    assert spotter.feed(_speech_frame()) is True

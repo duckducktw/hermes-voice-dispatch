@@ -99,6 +99,12 @@ class VoiceDispatcher:
         self._round_busy = False
         self._round_deadline = 0.0
         self._round_handoff = False  # True = 交棒給結果監看執行緒去解鎖
+        # 麥克風死訊號閘門（2026-09-28）：最近一次 _log_stream_health 的判定。
+        # 死訊號時 openWakeWord 仍會在常數 DC 上跑出 0.85~0.97 的假強命中
+        # （實測 9/28 整夜 2~7 點無人講話卻喚醒 80+ 次，每次後面都緊跟
+        #  「麥克風疑似死訊號」警告）→ 這種狀態一律不喚醒。
+        self._mic_dead = False
+        self._last_resuspend = 0.0  # 上次對 source 做 suspend/resume 的時間（有冷卻）
 
     # ------------------------------------------------------------------
     # 生命週期
@@ -333,6 +339,7 @@ class VoiceDispatcher:
                 relaxed_threshold=self.cfg.wake.oww_relaxed_threshold,
                 window_frames=self.cfg.wake.oww_window_frames,
                 relaxed_hits=self.cfg.wake.oww_relaxed_hits,
+                min_ac_rms=getattr(self.cfg.wake, "oww_min_ac_rms", 0.0012),
             )
         except oww.OwwUnavailable:
             log.warning("openWakeWord 不可用，回退 wake.mode=kws 的既有串接引擎。")
@@ -533,11 +540,23 @@ class VoiceDispatcher:
                 rms, peak, crest,
             )
             if crest < 2.0 or peak < 0.003:
+                self._mic_dead = True
                 log.warning(
                     "麥克風疑似死訊號（crest=%.2f peak=%.5f）→ 之後拍手不會有反應，"
                     "問題在擷取路徑/驅動，不是拍手門檻。",
                     crest, peak,
                 )
+                # 2026-09-28：先試最輕量的恢復（只 suspend/resume 自己這支 source）。
+                # 有冷卻，避免死訊號持續時每輪都做一次。
+                cool = float(getattr(self.cfg.audio, "resuspend_cooldown_sec", 120.0) or 0.0)
+                now = time.monotonic()
+                if cool > 0 and (not self._last_resuspend or now - self._last_resuspend >= cool):
+                    self._last_resuspend = now
+                    self._resuspend_source()
+            else:
+                if self._mic_dead:
+                    log.info("麥克風恢復訊號（crest=%.2f peak=%.5f）→ 解除喚醒封鎖", crest, peak)
+                self._mic_dead = False
             if crest >= 2.0 and peak >= 0.01:
                 # 健康檢查通過還不算數：重啟音效堆疊後 mic 常「假活」十幾秒就又凍結，
                 # 若一通過就把計數歸零，退避永遠長不起來（2026-09-25 實測：每 2 分鐘
@@ -579,6 +598,52 @@ class VoiceDispatcher:
                 )
         except OSError as exc:
             log.debug("狀態檔寫入失敗：%s", exc)
+
+    def _resuspend_source(self) -> bool:
+        """死訊號時只對「這支麥克風」做 suspend → resume，讓 ALSA 重新協商擷取端點。
+
+        2026-09-28 實測有效：這支 Generalplus USB 麥克風跑久了會退化成死訊號
+        （常數 DC、AC-RMS 0.0003、播聲音也進不去，連 `arecord -D plughw` 直取都一樣），
+        `pactl suspend-source <名> 1` → `0` 之後 AC-RMS 立刻回到 0.017。
+
+        ⚠️ **不要**用 `audio.recover_command`（重啟 wireplumber/pipewire）來救這個：
+        那會把 Discord／Minecraft 等所有 app 的音訊串流一起砍掉
+        （2026-09-25 實測一天 36 次）。只動自己這一支 source 沒有副作用。
+        """
+        name = str(getattr(self.cfg.audio, "device", "") or "").strip()
+        if not name:
+            return False
+        try:
+            listing = subprocess.run(
+                ["pactl", "list", "sources", "short"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+        except Exception as exc:  # noqa: BLE001
+            log.warning("查詢音源清單失敗：%s", exc)
+            return False
+        target = ""
+        for line in listing.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and name.lower() in parts[1].lower():
+                target = parts[1]
+                break
+        if not target:
+            log.warning("找不到符合 '%s' 的音源，略過 suspend/resume 恢復。", name)
+            return False
+        log.warning("麥克風死訊號 → 對 %s 做 suspend/resume 恢復（不動共用音效堆疊）", target)
+        try:
+            for state in ("1", "0"):
+                subprocess.run(
+                    ["pactl", "suspend-source", target, state],
+                    capture_output=True, timeout=10,
+                )
+                time.sleep(2.0)
+        except Exception as exc:  # noqa: BLE001
+            log.error("suspend/resume 恢復失敗：%s", exc)
+            return False
+        audio.reset_portaudio()
+        log.info("suspend/resume 完成，重新開啟串流。")
+        return True
 
     def _recover_audio(self) -> None:
         """凍結時重啟音訊堆疊。有冷卻，避免把使用者的音訊一直打斷。"""

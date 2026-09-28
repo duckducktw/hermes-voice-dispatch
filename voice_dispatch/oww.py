@@ -54,6 +54,7 @@ class OwwSpotter:
         relaxed_threshold: float = 0.60,
         window_frames: int = 6,
         relaxed_hits: int = 2,
+        min_ac_rms: float = 0.0012,
     ):
         self._log = logger or logging.getLogger(__name__)
         self.model_path = os.path.expanduser(model_path)
@@ -61,6 +62,10 @@ class OwwSpotter:
         self.relaxed_threshold = float(relaxed_threshold)
         self.window_frames = max(1, int(window_frames))
         self.relaxed_hits = max(1, int(relaxed_hits))
+        # 2026-09-28：去 DC 後的 AC-RMS 靜音閘。低於此值＝麥克風沒訊號（死訊號／純 DC），
+        # 直接記 0 分不送模型。實測死訊號時 AC-RMS ≈ 0.0001~0.0003、
+        # 真喊「hey hermes」時 >= 0.01，中間有 30 倍以上的餘裕。0 = 停用。
+        self.min_ac_rms = float(min_ac_rms)
         self.vad_threshold = float(vad_threshold)
         self._buffer = np.zeros(0, dtype=np.int16)
         self._recent: deque = deque(maxlen=self.window_frames)
@@ -115,6 +120,22 @@ class OwwSpotter:
         )
         return (np.clip(safe, -1.0, 1.0) * 32767.0).astype(np.int16)
 
+    @staticmethod
+    def _remove_dc(frame: np.ndarray) -> np.ndarray:
+        """移除 DC offset（直流偏移）後再送模型。
+
+        2026-09-28 根因：這支 Generalplus USB 麥克風的硬體增益全開（+33dB）＋
+        Auto Gain Control 開啟時，輸出帶著 **0.008~0.015 的固定直流偏移**，
+        AC 成分（真正的聲音）只有 0.0003。openWakeWord 的 melspectrogram 前端
+        會把這個偏移當成訊號，於是安靜的房間也能穩定跑出 0.85~0.97 的「強命中」
+        —— 整晚 2~7 點無人講話卻喚醒 80 幾次就是這麼來的，**調門檻治不了**
+        （真喊也是 0.85~0.97，兩者完全重疊）。
+        移掉 DC 之後，安靜時分數才會回到 0.0x。
+        """
+        samples = frame.astype(np.float32, copy=False)
+        centered = samples - float(samples.mean())
+        return np.clip(centered, -32768.0, 32767.0).astype(np.int16)
+
     def _score(self, frame: np.ndarray) -> float:
         """回傳這一幀所有輸出中最高的模型分數。"""
         predictions = self._model.predict(frame)
@@ -138,6 +159,15 @@ class OwwSpotter:
         while self._buffer.size >= FRAME_SAMPLES:
             frame = self._buffer[:FRAME_SAMPLES]
             self._buffer = self._buffer[FRAME_SAMPLES:]
+            frame = self._remove_dc(frame)
+            if self.min_ac_rms > 0.0:
+                ac_rms = float(np.sqrt(np.mean(np.square(frame.astype(np.float32))))) / 32768.0
+                if ac_rms < self.min_ac_rms:
+                    # 死訊號／純 DC：不送模型，分數直接記 0。
+                    self.latest_score = 0.0
+                    self.consecutive_frames = 0
+                    self._recent.append(0.0)
+                    continue
             score = self._score(frame)
             self.latest_score = score
             self.peak_score = max(self.peak_score, score)
