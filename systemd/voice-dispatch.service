@@ -23,6 +23,9 @@ Type=simple
 WorkingDirectory=%h/Data/Dev/python/hermes-voice-dispatch
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # 本機設定（音色素材路徑等機器專屬值）放 repo 的 config.yaml，用 --config 指過去。
+# ⚠️ 2026-09-28：曾在這裡加 `ExecStartPre=... setup_aec.sh` 建 AEC 麥克風，
+#   已**移除**——AEC 會把喇叭輸出變電音（使用者：「靠，我的喇叭電音」）。
+#   別再加回來；細節見 config.yaml 的 audio 區段與 scripts/setup_aec.sh 檔頭。
 ExecStart=%h/.hermes/hermes-agent/venv/bin/python3 -m voice_dispatch --config %h/Data/Dev/python/hermes-voice-dispatch/config.yaml
 Restart=always
 RestartSec=3
