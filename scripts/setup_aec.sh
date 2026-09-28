@@ -1,33 +1,28 @@
 #!/usr/bin/env bash
-# setup_aec.sh — 建立 AEC（回音消除）麥克風。
+# setup_aec.sh — 舊的 AEC 設定方式（**sink 模式**）。⚠️ **已被 monitor.mode 取代，不要用。**
 #
-# ⚠️⚠️ 2026-09-28 **此方案已被使用者退貨，預設不啟用，不要自動跑這支腳本** ⚠️⚠️
+# 現行做法（2026-09-28 定案）＝ PipeWire 官方的 `monitor.mode = true`：
+#   設定檔 `pipewire/hermes-aec.conf` → 安裝到
+#   `~/.config/pipewire/pipewire.conf.d/`，開機自動載入，不需要這支腳本。
+#   參考訊號從「預設 sink 的 monitor 埠」取 → **不建 AEC sink、不碰播放路徑**
+#   → 喇叭音質完全不受影響。實測衰減 71%，daemon 讀 HermesMicAEC 正常。
 #
-# 當初動機（使用者：「電腦發出來的聲音不納入語音辨識，電腦發出來不被錄」）與實測結果：
-#   ✅ 回音消除本身有效：同一段 TTS，原始 mic ac_rms 0.0763 → AEC 0.00303 ＝ **衰減 96%**
-#      （第一次只量到 27% 是因為沒做第 2 步，見下方）。
-#   ❌ **但喇叭輸出會變電音** —— 使用者原話：「靠，我的喇叭電音」。原因：把預設 sink 切成
-#      AEC sink 之後，**所有** 播放音訊都要經過 webrtc AEC 處理，這台機器上
-#      （USB mic 48k mono ↔ Speaker sink 48k stereo，需重取樣/聲道轉換）音質被毀。
-#   ❌ 而且 daemon 讀 AEC source 後 journal 完全停住（80 秒沒有任何「觀測」輸出）。
+# 這支腳本走的是 module-echo-cancel 的**預設 sink 模式**：
+#   ✅ 衰減更高（96%）
+#   ❌ 但必須 `pactl set-default-sink HermesAecSink`，於是**所有**播放都經 webrtc 處理
+#      → **喇叭變電音**（使用者原話：「靠，我的喇叭電音」）→ 當場退貨。
 #
-# → 結論：**在這台機器上不要用 AEC**。想避免電腦聲音造成誤喚醒，改用
-#   `wake.mute_while_system_audio`（讀 sink monitor 電平的來源閘門，預設 false，
-#   細節見 config.yaml）——那個不會碰音訊路徑，所以不會影響音質。
+# 保留原因：(1) 記錄 sink 模式「要三步才算真的開了」這個知識；
+#           (2) 誤開時能用 `--revert` 一鍵還原。
 #
-# 這支腳本保留下來只為兩件事：(1) 記錄「怎麼做才算真的開了 AEC」；
-# (2) 萬一哪天誤開了，能用 `--revert` 一鍵還原。
-#
-# 若真要重測（例如換了音效裝置），三個步驟缺一不可：
+# sink 模式的三個步驟（缺一就只有二十幾 % 衰減，這是最初誤判「AEC 沒用」的原因）：
 #   1. 載入 module-echo-cancel（產生 HermesMicAEC source + HermesAecSink sink）
-#   2. **把預設 sink 切成 HermesAecSink** —— AEC 要靠「流經自己 sink 的音訊」當參考訊號，
-#      播放不走它就沒東西可消，衰減只會有二十幾 %（這是第一次誤判「AEC 沒用」的原因）。
-#   3. 把已經在播的舊串流 move-sink-input 搬過去（否則它們仍走舊 sink）。
-#   然後 config.yaml 的 audio.device 要改成 "HermesMicAEC"。
+#   2. **把預設 sink 切成 HermesAecSink** —— 要靠「流經自己 sink 的音訊」當參考訊號
+#   3. 把已在播的舊串流 move-sink-input 搬過去
 #
 # 用法：
-#   bash scripts/setup_aec.sh          # 建立/確保啟用（**會讓喇叭變電音，慎用**）
-#   bash scripts/setup_aec.sh --revert # 還原（卸掉模組、預設 sink 切回喇叭）
+#   bash scripts/setup_aec.sh          # sink 模式（**會讓喇叭變電音，不要用**）
+#   bash scripts/setup_aec.sh --revert # 還原
 set -uo pipefail
 
 MIC_MASTER="${AEC_MIC_MASTER:-alsa_input.usb-Generalplus_WordForum_USB-00.mono-fallback}"
