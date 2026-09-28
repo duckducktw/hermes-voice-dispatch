@@ -1262,7 +1262,14 @@ class VoiceDispatcher:
                     # single-flight：這一輪真的收工了才重新開放喚醒。
                     self._round_end("結果監看結束")
 
-            self._round_handoff = True
+            # ⚠️ 2026-09-28：**不再**把 single-flight 的解鎖交棒給結果監看執行緒。
+            # 原本 `self._round_handoff = True` 會讓喚醒閘一路鎖到「結果唸完」，
+            # 但監看最長盯 tts.speak_result_watch_sec（1800s）＞ 保險絲
+            # wake.single_flight_max_sec（900s）→ 實測 15:07 派工後整整 14 分鐘
+            # 叫不醒，直到逾時才強制解鎖（使用者：「現在叫他又不理我了」）。
+            # 使用者原始意圖是「講需求的過程中不要被誤觸第二遍」，不是「任務跑完前
+            # 都不准叫」——任務在背景跑時他本來就可能想下新指令。
+            # → 鎖的範圍縮回「喚醒 → 錄需求 → 派工送出」，由 run_once() 的 finally 解鎖。
             _th.Thread(target=_loop, daemon=True).start()
 
         # ── 派工方式 ──────────────────────────────────────────────────
@@ -1280,7 +1287,8 @@ class VoiceDispatcher:
             return
 
         try:
-            self._round_handoff = True   # 交棒：由 _on_exit 解鎖 single-flight
+            # 2026-09-28：同上，spawn 回退路徑也**不再**交棒鎖給子程序。
+            # `hermes -z` 跑久了（>900s）會撞到保險絲，期間使用者完全叫不醒。
             dispatch.spawn_hermes(
                 prompt, self.cfg, thread_id, logger=log, on_exit=_on_exit,
                 heartbeat=_heartbeat,
